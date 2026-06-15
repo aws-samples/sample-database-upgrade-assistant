@@ -1,0 +1,792 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  RDS Upgrade Assistant Foundation Infrastructure.
+  DynamoDB tables, S3 buckets, CloudFront, Step Functions, Lambda functions, IAM roles.
+  
+
+# ============================================================================
+# Parameters
+# ============================================================================
+Parameters:
+  ExternalId:
+    Type: String
+    NoEcho: true
+    Description: ExternalId for cross-account STS AssumeRole
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID (for Lambda functions needing VPC access)
+
+  SubnetIds:
+    Type: CommaDelimitedList
+    Description: Comma-separated list of subnet IDs
+
+# ============================================================================
+# Resources
+# ============================================================================
+Resources:
+
+  # --------------------------------------------------------------------------
+  # DynamoDB Tables
+  # --------------------------------------------------------------------------
+  RunsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: aurora-upgrade-planner-runs
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: runId
+          AttributeType: S
+        - AttributeName: agentType
+          AttributeType: S
+        - AttributeName: startTime
+          AttributeType: S
+        - AttributeName: inputHash
+          AttributeType: S
+      KeySchema:
+        - AttributeName: runId
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      GlobalSecondaryIndexes:
+        - IndexName: agentType-startTime-index
+          KeySchema:
+            - AttributeName: agentType
+              KeyType: HASH
+            - AttributeName: startTime
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: inputHash-index
+          KeySchema:
+            - AttributeName: inputHash
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  FindingsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: aurora-upgrade-planner-findings
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: runId
+          AttributeType: S
+        - AttributeName: findingId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: runId
+          KeyType: HASH
+        - AttributeName: findingId
+          KeyType: RANGE
+
+  ProgressEventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: aurora-upgrade-planner-progress-events
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: runId
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: runId
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
+
+  ConnectionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: aurora-upgrade-planner-connections
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: connectionId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: connectionId
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+
+  SettingsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: aurora-upgrade-planner-settings
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: settingKey
+          AttributeType: S
+      KeySchema:
+        - AttributeName: settingKey
+          KeyType: HASH
+
+  # --------------------------------------------------------------------------
+  # S3 Buckets
+  # --------------------------------------------------------------------------
+  ReportBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub aurora-upgrade-planner-reports-${AWS::AccountId}-${AWS::Region}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToIntelligentTiering
+            Status: Enabled
+            Transitions:
+              - StorageClass: INTELLIGENT_TIERING
+                TransitionInDays: 90
+          - Id: ExpireOldReports
+            Status: Enabled
+            Prefix: upgrade-tests/
+            ExpirationInDays: 180
+          - Id: ExpireOldFindings
+            Status: Enabled
+            Prefix: findings/
+            ExpirationInDays: 180
+          - Id: ExpireOldClusterAnalysis
+            Status: Enabled
+            Prefix: cluster-analysis/
+            ExpirationInDays: 180
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub aurora-upgrade-planner-frontend-${AWS::AccountId}-${AWS::Region}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontOAI
+            Effect: Allow
+            Principal:
+              CanonicalUser: !GetAtt CloudFrontOAI.S3CanonicalUserId
+            Action: s3:GetObject
+            Resource: !Sub ${FrontendBucket.Arn}/*
+
+  # --------------------------------------------------------------------------
+  # CloudFront Distribution
+  # --------------------------------------------------------------------------
+  CloudFrontOAI:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: OAI for RDS Upgrade Assistant frontend
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Origins:
+          - Id: S3FrontendOrigin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub origin-access-identity/cloudfront/${CloudFrontOAI}
+        DefaultCacheBehavior:
+          TargetOriginId: S3FrontendOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          ForwardedValues:
+            QueryString: false
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 10
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 10
+
+  # --------------------------------------------------------------------------
+  # IAM Role - Shared Lambda Execution Role
+  # --------------------------------------------------------------------------
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aurora-upgrade-planner-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/aurora-upgrade-planner-*
+              - Sid: S3ReadWrite
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                  - s3:HeadObject
+                Resource:
+                  - !GetAtt ReportBucket.Arn
+                  - !Sub ${ReportBucket.Arn}/*
+              - Sid: DynamoDBCRUD
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt RunsTable.Arn
+                  - !Sub ${RunsTable.Arn}/index/*
+                  - !GetAtt FindingsTable.Arn
+                  - !GetAtt ProgressEventsTable.Arn
+                  - !GetAtt ConnectionsTable.Arn
+                  - !GetAtt SettingsTable.Arn
+              - Sid: RDSReadOnly
+                Effect: Allow
+                Action:
+                  - rds:DescribeDBEngineVersions
+                  - rds:DescribeDBClusters
+                  - rds:DescribeDBInstances
+                  - rds:DescribeDBClusterParameters
+                  - rds:DescribeDBClusterSnapshots
+                Resource: '*'
+              - Sid: RDSCloneAndUpgrade
+                Effect: Allow
+                Action:
+                  - rds:RestoreDBClusterToPointInTime
+                  - rds:RestoreDBClusterFromSnapshot
+                  - rds:CopyDBClusterSnapshot
+                Resource:
+                  - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:*
+                  - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:subgrp:*
+                  - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster-snapshot:*
+              - Sid: RDSWriteOnClones
+                Effect: Allow
+                Action:
+                  - rds:CreateDBInstance
+                  - rds:ModifyDBCluster
+                  - rds:DeleteDBCluster
+                  - rds:DeleteDBInstance
+                  - rds:DeleteDBClusterSnapshot
+                  - rds:AddTagsToResource
+                Resource:
+                  - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:aurora-planner-test-*
+                  - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:aurora-planner-test-*
+                  - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster-snapshot:aurora-planner-*
+                  - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster-pg:*
+                  - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:pg:*
+              - Sid: PerformanceInsights
+                Effect: Allow
+                Action:
+                  - pi:GetResourceMetrics
+                Resource: '*'
+              - Sid: LambdaInvoke
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:aurora-upgrade-planner-*
+              - Sid: StepFunctionsStart
+                Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: !GetAtt UpgradeTestStateMachine.Arn
+              - Sid: STSAssumeRole
+                Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                  - sts:GetCallerIdentity
+                Resource: !Sub arn:aws:iam::*:role/aurora-upgrade-planner-cross-account-role
+              - Sid: BedrockListModels
+                Effect: Allow
+                Action:
+                  - bedrock:ListFoundationModels
+                Resource: '*'
+              - Sid: AgentCoreInvoke
+                Effect: Allow
+                Action:
+                  - bedrock-agentcore:InvokeAgentRuntime
+                Resource:
+                  - !Sub arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:runtime/*
+              - Sid: SecretsManagerGitHub
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:PutSecretValue
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:DeleteSecret
+                  - secretsmanager:DescribeSecret
+                Resource:
+                  - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:aurora-upgrade-planner/github-token*
+
+  # --------------------------------------------------------------------------
+  # Step Functions State Machine
+  # --------------------------------------------------------------------------
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aurora-upgrade-planner-sfn-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambdas
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:aurora-upgrade-planner-*
+
+  UpgradeTestStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: aurora-upgrade-planner-upgrade-test
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Aurora Upgrade Test Pipeline — Baseline → Clone → WaitForClone → Upgrade → WaitForUpgrade → Validation → Cleanup",
+          "StartAt": "Baseline",
+          "States": {
+            "Baseline": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:aurora-upgrade-planner-baseline",
+              "ResultPath": "$.stepResult",
+              "TimeoutSeconds": 900,
+              "Next": "Clone",
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "ResultPath": "$.error",
+                  "Next": "Cleanup"
+                }
+              ]
+            },
+            "Clone": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:aurora-upgrade-planner-clone",
+              "InputPath": "$.stepResult",
+              "ResultPath": "$.stepResult",
+              "TimeoutSeconds": 900,
+              "Next": "InitClonePollCount",
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "ResultPath": "$.error",
+                  "Next": "Cleanup"
+                }
+              ]
+            },
+            "InitClonePollCount": {
+              "Type": "Pass",
+              "Result": {"count": 0},
+              "ResultPath": "$.pollCount",
+              "Next": "WaitForClone"
+            },
+            "WaitForClone": {
+              "Type": "Wait",
+              "Seconds": 60,
+              "Next": "PollCloneStatus"
+            },
+            "PollCloneStatus": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:aurora-upgrade-planner-poll-status",
+              "InputPath": "$.stepResult",
+              "ResultPath": "$.pollResult",
+              "TimeoutSeconds": 900,
+              "Next": "IncrementClonePollCount",
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "ResultPath": "$.error",
+                  "Next": "Cleanup"
+                }
+              ]
+            },
+            "IncrementClonePollCount": {
+              "Type": "Pass",
+              "Parameters": {
+                "count.$": "States.MathAdd($.pollCount.count, 1)"
+              },
+              "ResultPath": "$.pollCount",
+              "Next": "CheckCloneStatus"
+            },
+            "CheckCloneStatus": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.pollResult.status",
+                  "StringEquals": "available",
+                  "Next": "Upgrade"
+                },
+                {
+                  "Variable": "$.pollResult.status",
+                  "StringEquals": "failed",
+                  "Next": "CloneFailed"
+                },
+                {
+                  "Variable": "$.pollResult.status",
+                  "StringEquals": "deleting",
+                  "Next": "CloneFailed"
+                },
+                {
+                  "Variable": "$.pollCount.count",
+                  "NumericGreaterThanEquals": 60,
+                  "Next": "CloneTimeout"
+                }
+              ],
+              "Default": "WaitForClone"
+            },
+            "CloneFailed": {
+              "Type": "Fail",
+              "Error": "CloneFailed",
+              "Cause": "Clone cluster entered failed or deleting state"
+            },
+            "CloneTimeout": {
+              "Type": "Fail",
+              "Error": "CloneTimeout",
+              "Cause": "Clone did not become available within 60 minutes"
+            },
+            "Upgrade": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:aurora-upgrade-planner-upgrade",
+              "Parameters": {
+                "runId.$": "$.stepResult.runId",
+                "cloneId.$": "$.stepResult.cloneId"
+              },
+              "ResultPath": "$.stepResult",
+              "TimeoutSeconds": 900,
+              "Next": "InitUpgradePollCount",
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "ResultPath": "$.error",
+                  "Next": "Cleanup"
+                }
+              ]
+            },
+            "InitUpgradePollCount": {
+              "Type": "Pass",
+              "Result": {"count": 0},
+              "ResultPath": "$.pollCount",
+              "Next": "WaitForUpgrade"
+            },
+            "WaitForUpgrade": {
+              "Type": "Wait",
+              "Seconds": 60,
+              "Next": "PollUpgradeStatus"
+            },
+            "PollUpgradeStatus": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:aurora-upgrade-planner-poll-status",
+              "InputPath": "$.stepResult",
+              "ResultPath": "$.pollResult",
+              "TimeoutSeconds": 900,
+              "Next": "IncrementUpgradePollCount",
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "ResultPath": "$.error",
+                  "Next": "Cleanup"
+                }
+              ]
+            },
+            "IncrementUpgradePollCount": {
+              "Type": "Pass",
+              "Parameters": {
+                "count.$": "States.MathAdd($.pollCount.count, 1)"
+              },
+              "ResultPath": "$.pollCount",
+              "Next": "CheckUpgradeStatus"
+            },
+            "CheckUpgradeStatus": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.pollResult.status",
+                  "StringEquals": "available",
+                  "Next": "Validation"
+                },
+                {
+                  "Variable": "$.pollResult.status",
+                  "StringEquals": "failed",
+                  "Next": "UpgradeFailed"
+                },
+                {
+                  "Variable": "$.pollResult.status",
+                  "StringEquals": "deleting",
+                  "Next": "UpgradeFailed"
+                },
+                {
+                  "Variable": "$.pollCount.count",
+                  "NumericGreaterThanEquals": 60,
+                  "Next": "UpgradeTimeout"
+                }
+              ],
+              "Default": "WaitForUpgrade"
+            },
+            "UpgradeFailed": {
+              "Type": "Fail",
+              "Error": "UpgradeFailed",
+              "Cause": "Upgrade cluster entered failed or deleting state"
+            },
+            "UpgradeTimeout": {
+              "Type": "Fail",
+              "Error": "UpgradeTimeout",
+              "Cause": "Upgrade did not complete within 60 minutes"
+            },
+            "Validation": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:aurora-upgrade-planner-validation",
+              "Parameters": {
+                "runId.$": "$.stepResult.runId",
+                "cloneId.$": "$.stepResult.cloneId"
+              },
+              "ResultPath": "$.stepResult",
+              "TimeoutSeconds": 900,
+              "Next": "Cleanup",
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "ResultPath": "$.error",
+                  "Next": "Cleanup"
+                }
+              ]
+            },
+            "Cleanup": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:aurora-upgrade-planner-cleanup",
+              "Parameters": {
+                "runId.$": "$.stepResult.runId",
+                "cloneId.$": "$.stepResult.cloneId"
+              },
+              "TimeoutSeconds": 900,
+              "End": true
+            }
+          }
+        }
+
+  # --------------------------------------------------------------------------
+  # Lambda Functions
+  # --------------------------------------------------------------------------
+  DeprecationLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: aurora-upgrade-planner-deprecation
+      Runtime: python3.12
+      Handler: lambdas/deprecation.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 900
+      MemorySize: 512
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_PREFIX: aurora-upgrade-planner-
+          S3_REPORT_BUCKET: !Ref ReportBucket
+          AGENTCORE_CATALOG_EXTRACT_ENDPOINT: ''
+      Code:
+        ZipFile: "def handler(event, context): pass"
+
+  CodeAnalysisLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: aurora-upgrade-planner-code-analysis
+      Runtime: python3.12
+      Handler: lambdas/code_analysis.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 900
+      MemorySize: 1024
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_PREFIX: aurora-upgrade-planner-
+          S3_REPORT_BUCKET: !Ref ReportBucket
+          AGENTCORE_CODE_ENRICHMENT_ENDPOINT: ''
+      Code:
+        ZipFile: "def handler(event, context): pass"
+
+  BaselineLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: aurora-upgrade-planner-baseline
+      Runtime: python3.12
+      Handler: lambdas/baseline.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 256
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_PREFIX: aurora-upgrade-planner-
+          S3_REPORT_BUCKET: !Ref ReportBucket
+      Code:
+        ZipFile: "def handler(event, context): pass"
+
+  CloneLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: aurora-upgrade-planner-clone
+      Runtime: python3.12
+      Handler: lambdas/clone.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 256
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_PREFIX: aurora-upgrade-planner-
+          S3_REPORT_BUCKET: !Ref ReportBucket
+      Code:
+        ZipFile: "def handler(event, context): pass"
+
+  UpgradeLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: aurora-upgrade-planner-upgrade
+      Runtime: python3.12
+      Handler: lambdas/upgrade.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 256
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_PREFIX: aurora-upgrade-planner-
+          S3_REPORT_BUCKET: !Ref ReportBucket
+      Code:
+        ZipFile: "def handler(event, context): pass"
+
+  ValidationLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: aurora-upgrade-planner-validation
+      Runtime: python3.12
+      Handler: lambdas/validation.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 900
+      MemorySize: 512
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_PREFIX: aurora-upgrade-planner-
+          S3_REPORT_BUCKET: !Ref ReportBucket
+          AGENTCORE_REPORT_ENDPOINT: ''
+      Code:
+        ZipFile: "def handler(event, context): pass"
+
+  CleanupLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: aurora-upgrade-planner-cleanup
+      Runtime: python3.12
+      Handler: lambdas/cleanup.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 600
+      MemorySize: 256
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_PREFIX: aurora-upgrade-planner-
+          S3_REPORT_BUCKET: !Ref ReportBucket
+      Code:
+        ZipFile: "def handler(event, context): pass"
+
+  PollStatusLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: aurora-upgrade-planner-poll-status
+      Runtime: python3.12
+      Handler: lambdas/poll_status.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_PREFIX: aurora-upgrade-planner-
+          S3_REPORT_BUCKET: !Ref ReportBucket
+      Code:
+        ZipFile: "def handler(event, context): pass"
+
+  DeprecationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/aurora-upgrade-planner-deprecation
+      RetentionInDays: 30
+
+  CodeAnalysisLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/aurora-upgrade-planner-code-analysis
+      RetentionInDays: 30
+
+Outputs:
+  ReportBucketName:
+    Value: !Ref ReportBucket
+    Export:
+      Name: !Sub ${AWS::StackName}-ReportBucketName
+  FrontendBucketName:
+    Value: !Ref FrontendBucket
+    Export:
+      Name: !Sub ${AWS::StackName}-FrontendBucketName
+  CloudFrontURL:
+    Value: !Sub https://${CloudFrontDistribution.DomainName}
+    Export:
+      Name: !Sub ${AWS::StackName}-CloudFrontURL
+  CloudFrontDistributionId:
+    Value: !Ref CloudFrontDistribution
+    Export:
+      Name: !Sub ${AWS::StackName}-CloudFrontDistributionId
+  LambdaExecutionRoleArn:
+    Value: !GetAtt LambdaExecutionRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-LambdaExecutionRoleArn
+  UpgradeTestStateMachineArn:
+    Value: !GetAtt UpgradeTestStateMachine.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-UpgradeTestStateMachineArn
+  SubnetIds:
+    Value: !Join [',', !Ref SubnetIds]
+    Export:
+      Name: !Sub ${AWS::StackName}-SubnetIds
+  ProgressEventsStreamArn:
+    Value: !GetAtt ProgressEventsTable.StreamArn
+    Export:
+      Name: !Sub ${AWS::StackName}-ProgressEventsStreamArn
