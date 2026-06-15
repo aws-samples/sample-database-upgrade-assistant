@@ -18,7 +18,7 @@ AI-powered tool that automates Aurora MySQL and PostgreSQL upgrade readiness ass
 - **Storage**: DynamoDB (run records, findings, settings), S3 (reports, catalog), Secrets Manager (GitHub token)
 - **Orchestration**: Step Functions with guaranteed clone cleanup on all failure paths
 
-![Architecture](docs/architecture-current.png)
+![Architecture](docs/Upgrade Assistant Architecture.png)
 
 ### AgentCore Agents
 
