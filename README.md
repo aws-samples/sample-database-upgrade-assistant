@@ -1,6 +1,7 @@
-# RDS Upgrade Assistant
+# RDS Upgrade Assistant 
 
 AI-powered tool that automates Aurora MySQL and PostgreSQL upgrade readiness assessment. Combines deterministic AWS API calls with Amazon Bedrock AgentCore to produce actionable upgrade reports — all on a fully serverless architecture with zero always-on infrastructure.
+**THIS IS FOR NON-PRODUCTION USE**
 
 ## What It Does
 
