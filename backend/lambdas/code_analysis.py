@@ -26,7 +26,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from urllib.request import Request, urlopen
-from urllib.error import URLError
+from urllib.error import URLError, HTTPError
 
 import boto3
 from botocore.exceptions import ClientError
@@ -563,8 +563,6 @@ def _retrieve_from_github(github_url):
 
     import tarfile
     import io
-    from urllib.request import Request, urlopen
-    from urllib.error import HTTPError, URLError
 
     req = Request(tarball_url, headers=headers, method="GET")
 
@@ -1013,7 +1011,6 @@ def _enrich_findings(findings, target_version, engine):
                     len(to_enrich), len(findings), len(unenriched_remainder))
 
     enriched = []
-    batch_size = 50  # Larger batches = fewer AgentCore calls
 
     # Run enrichment batches in parallel (up to 4 concurrent)
     import concurrent.futures
@@ -1063,11 +1060,6 @@ def _enrich_batch(findings_batch, target_version, engine, endpoint):
         f"Target version: {target_version}\n\n"
         f"Findings to enrich:\n{json.dumps(findings_for_llm, indent=2)}"
     )
-
-    payload = {
-        "input": user_message,
-        "systemContext": ENRICHMENT_SYSTEM_CONTEXT,
-    }
 
     try:
         from shared.agentcore_client import invoke_agentcore

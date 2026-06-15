@@ -364,7 +364,8 @@ def _replay_queries(clone_endpoint, engine, queries):
             except Exception as e:
                 elapsed_ms = (time.time() - start) * 1000
                 error_str = str(e)[:200]
-                # Detect timeout vs other failures
+                # Detect timeout vs syntax/runtime failure.
+                # Subtract 500ms buffer to account for measurement overhead.
                 if elapsed_ms >= (QUERY_TIMEOUT_SECONDS * 1000 - 500):
                     results.append({"queryId": query_id, "digest": digest,
                                     "status": "timeout", "latencyMs": round(elapsed_ms, 2),

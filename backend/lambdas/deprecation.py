@@ -307,8 +307,6 @@ def _extract_breaking_changes(versions_data, documentation):
         "for these major upgrade paths."
     )
 
-    payload = {"input": input_text}
-
     try:
         endpoint = AGENTCORE_CATALOG_EXTRACT_ENDPOINT
         if not endpoint:

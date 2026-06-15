@@ -36,25 +36,17 @@ def handler(event, context):
     clone_id = event.get("cloneId", "")
     snapshot_id = event.get("snapshotId", "")
 
-    # If no cloneId in event, look it up from DynamoDB run state
-    if not clone_id and run_id:
+    # If either ID is missing, look them up from DynamoDB run state in one read
+    if run_id and (not clone_id or not snapshot_id):
         try:
             run_state = get_run(run_id)
             if run_state:
-                clone_id = run_state.get("clonedClusterId", "")
+                if not clone_id:
+                    clone_id = run_state.get("clonedClusterId", "")
                 if not snapshot_id:
                     snapshot_id = run_state.get("snapshotId", "")
         except Exception as e:
-            logger.warning("Could not read run state for clone lookup: %s", e)
-
-    # If no snapshotId in event, check run state
-    if not snapshot_id and run_id:
-        try:
-            run_state = get_run(run_id)
-            if run_state:
-                snapshot_id = run_state.get("snapshotId", "")
-        except Exception as e:
-            logger.warning("Could not read run state for snapshot cleanup: %s", e)
+            logger.warning("Could not read run state for cleanup lookup: %s", e)
 
     if not clone_id and not snapshot_id:
         logger.warning("No cloneId or snapshotId provided — nothing to clean up")

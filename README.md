@@ -1,7 +1,8 @@
-# RDS Upgrade Assistant 
+# RDS Upgrade Assistant
 
 AI-powered tool that automates Aurora MySQL and PostgreSQL upgrade readiness assessment. Combines deterministic AWS API calls with Amazon Bedrock AgentCore to produce actionable upgrade reports — all on a fully serverless architecture with zero always-on infrastructure.
-**THIS IS FOR NON-PRODUCTION USE**
+
+> **Note:** This tool is intended for **non-production use** only. All upgrade operations run on clones of your clusters — production clusters are never modified.
 
 ## What It Does
 
@@ -26,8 +27,8 @@ AI-powered tool that automates Aurora MySQL and PostgreSQL upgrade readiness ass
 | Agent | Model | Purpose |
 |---|---|---|
 | catalog_extract | Claude Haiku 4.5 | Extracts breaking changes from AWS documentation |
-| code_enrichment | Claude Sonnet 4 | Enriches code findings with contextual remediation |
-| report | Claude Sonnet 4 | Generates GO/NO-GO verdict with confidence score + HTML report |
+| code_enrichment | Claude Sonnet 4.5 | Enriches code findings with contextual remediation |
+| report | Claude Sonnet 4.5 | Generates GO/NO-GO verdict with confidence score + HTML report |
 
 No direct Bedrock API calls — all AI inference goes through AgentCore.
 
@@ -52,7 +53,7 @@ No direct Bedrock API calls — all AI inference goes through AgentCore.
 - Python 3.12+
 - AgentCore CLI (`npm install -g @aws/agentcore`)
 - A VPC with subnets (for RDS clone operations)
-- Amazon Bedrock model access enabled (Claude Haiku 4.5, Claude Sonnet 4)
+- Amazon Bedrock model access enabled (Claude Haiku 4.5, Claude Sonnet 4.5)
 
 ## Installation
 

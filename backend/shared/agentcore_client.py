@@ -10,6 +10,9 @@ from .config import REGION
 
 logger = logging.getLogger(__name__)
 
+# Module-level boto3 client reused across Lambda invocations (connection pooling).
+# boto3 clients are thread-safe for read operations; concurrent Lambda invocations
+# each have their own process so this is safe.
 _client = None
 
 

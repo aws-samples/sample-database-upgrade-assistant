@@ -1,7 +1,7 @@
 """
 RDS Upgrade Assistant — Main REST API Lambda Handler.
 
-Routes all REST endpoints. Routes all REST endpoints.
+Routes all REST endpoints for the Aurora Upgrade Planner API.
 """
 
 import hashlib

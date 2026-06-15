@@ -32,4 +32,4 @@ Return ONLY valid JSON as an array of enriched findings:
   }
 ]"""
 
-MODEL_ID = "us.anthropic.claude-sonnet-4-20250514-v1:0"
+MODEL_ID = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"

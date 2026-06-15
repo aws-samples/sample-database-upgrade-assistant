@@ -9,7 +9,7 @@ This document is intended for the customer's security team to review and approve
 | AWS Account | One AWS account to host the tool infrastructure |
 | Region | us-east-1 (default, configurable) |
 | VPC | Existing VPC with subnets (for RDS clone operations and DB connectivity) |
-| Amazon Bedrock | Model access enabled for Claude Haiku 4.5 and Claude Sonnet 4 |
+| Amazon Bedrock | Model access enabled for Claude Haiku 4.5 and Claude Sonnet 4.5 |
 | Amazon Bedrock AgentCore | Ability to deploy 3 AgentCore runtimes |
 | CloudFormation | Ability to deploy 2 CloudFormation stacks |
 | IAM | Ability to create 3 IAM roles (or use pre-created roles) |
@@ -53,7 +53,7 @@ This document is intended for the customer's security team to review and approve
 - **Purpose**: Allows AgentCore runtimes to invoke Bedrock models and write logs
 - **Trust**: `bedrock-agentcore.amazonaws.com`
 - **Permissions**:
-  - Bedrock: InvokeModel, InvokeModelWithResponseStream on foundation models
+  - Bedrock: InvokeModel, InvokeModelWithResponseStream on foundation models (Claude Haiku 4.5, Claude Sonnet 4.5)
   - CloudWatch Logs: CreateLogGroup, CreateLogStream, PutLogEvents
   - X-Ray: PutTraceSegments, PutTelemetryRecords
 
@@ -124,7 +124,7 @@ This document is intended for the customer's security team to review and approve
 ## 7. Approval Checklist
 
 - [ ] IAM: Approve creation of 3 IAM roles with permissions listed in Section 2
-- [ ] Bedrock: Enable model access for Claude Haiku 4.5 and Claude Sonnet 4
+- [ ] Bedrock: Enable model access for Claude Haiku 4.5 and Claude Sonnet 4.5
 - [ ] Bedrock AgentCore: Approve AgentCore runtime deployment (3 agents)
 - [ ] Network: Lambda functions need outbound HTTPS (443) to Bedrock AgentCore, S3, RDS, STS, GitHub API
 - [ ] Cross-account: Create `aurora-upgrade-planner-cross-account-role` in target account(s)

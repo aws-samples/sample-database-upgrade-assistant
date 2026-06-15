@@ -31,4 +31,4 @@ Return ONLY valid JSON:
  "dbaChanges": [{"title": "...", "description": "...", "priority": "P1|P2|P3"}],
  "niceToHave": [{"title": "...", "description": "..."}]}"""
 
-MODEL_ID = "us.anthropic.claude-sonnet-4-20250514-v1:0"
+MODEL_ID = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"

@@ -5,13 +5,19 @@ Triggered by DynamoDB Streams on the progress-events table.
 Reads new progress events, queries the connections table for
 clients subscribed to the matching runId, and pushes the event
 payload to each connected WebSocket client.
+
+Stale connections (HTTP 410 GoneException) are automatically
+removed from the connections table.
 """
 
 import json
+import logging
 import os
 
 import boto3
 from boto3.dynamodb.types import TypeDeserializer
+
+logger = logging.getLogger(__name__)
 
 TABLE_PREFIX = os.environ.get("DYNAMODB_TABLE_PREFIX", "aurora-upgrade-planner-")
 CONNECTIONS_TABLE = f"{TABLE_PREFIX}connections"
@@ -50,9 +56,9 @@ def _post_to_connection(apigw_client, connection_id, payload):
             connections_table.delete_item(Key={"connectionId": connection_id})
         except Exception:
             pass
-    except Exception:
-        # Log but don't fail the batch
-        pass
+    except Exception as e:
+        # Log but don't fail the batch — one bad connection shouldn't block others
+        logger.warning("Failed to post to connection %s: %s", connection_id, e)
 
 
 def handler(event, context):
