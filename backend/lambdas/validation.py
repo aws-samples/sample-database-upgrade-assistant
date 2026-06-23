@@ -11,6 +11,9 @@ This step consolidates findings from:
 
 Then calls AgentCore for a GO/NO-GO/CONDITIONAL GO verdict
 and generates a polished HTML report.
+
+Security: Connects to the upgraded clone using credentials from DB_SECRET_ARN
+(Secrets Manager). If DB_SECRET_ARN is not configured, query replay is skipped.
 """
 
 import json
@@ -48,6 +51,7 @@ def handler(event, context):
         baseline = get_json(f"upgrade-tests/{run_id}/baseline.json")
         baseline_queries = baseline.get("topQueries", [])
         engine = baseline.get("engine", "aurora-mysql")
+        source_cluster_id = baseline.get("clusterId", "")
 
         # Get clone endpoint and post-upgrade version
         resp = rds.describe_db_clusters(DBClusterIdentifier=clone_id)
@@ -91,7 +95,7 @@ def handler(event, context):
             update_phase(run_id, "validation_replay", progress_pct=80)
             logger.info("Replaying %d baseline queries post-upgrade on %s",
                         len(baseline_queries), clone_endpoint)
-            post_replay_results = _replay_queries(clone_endpoint, engine, baseline_queries)
+            post_replay_results = _replay_queries(clone_endpoint, engine, baseline_queries, source_cluster_id)
 
             # Build baseline latency map for regression detection
             baseline_latency = {q.get("queryId", ""): q.get("avgLatencyMs", 0)
@@ -129,11 +133,12 @@ def handler(event, context):
                                     r["queryId"], baseline_max)
 
             # Detect latency regressions (>50% slower than baseline)
+            # Skip queries with baseline < 1ms — sub-millisecond differences are noise
             for r in post_replay_results:
                 if r["status"] == "pass" and r["queryId"] in baseline_latency:
                     before = baseline_latency[r["queryId"]]
                     after = r.get("latencyMs", 0)
-                    if before > 0 and after > before * 1.5:
+                    if before >= 1.0 and after > before * 1.5:
                         pct = round((after - before) / before * 100, 1)
                         query_regressions.append({
                             "queryId": r["queryId"],
@@ -250,23 +255,57 @@ def handler(event, context):
 # Query Replay
 # ---------------------------------------------------------------------------
 
-def _get_db_credentials(cluster_endpoint, engine):
-    """Retrieve DB credentials from Secrets Manager."""
-    if not DB_SECRET_ARN:
-        return None
-    try:
-        sm = boto3.client("secretsmanager", region_name=REGION)
-        secret = json.loads(sm.get_secret_value(SecretId=DB_SECRET_ARN)["SecretString"])
-        return {
-            "host": secret.get("host", cluster_endpoint),
-            "port": int(secret.get("port", 3306 if "mysql" in engine else 5432)),
-            "user": secret.get("username", secret.get("user", "admin")),
-            "password": secret.get("password", ""),
-            "dbname": secret.get("dbname", secret.get("database", "information_schema")),
-        }
-    except Exception as e:
-        logger.warning("Could not retrieve DB credentials: %s", e)
-        return None
+def _get_db_credentials(cluster_endpoint, engine, cluster_id=""):
+    """Retrieve DB credentials using tiered secret resolution:
+    
+    1. Check if cluster has RDS-managed secret (MasterUserSecret)
+    2. Convention-based lookup: aurora-upgrade-planner/db-creds/{cluster-id}
+    3. Fall back to DB_SECRET_ARN env var (legacy single-cluster mode)
+    
+    Returns dict with {host, port, user, password, dbname} or None.
+    """
+    sm = boto3.client("secretsmanager", region_name=REGION)
+
+    # Tier 1: RDS-managed secret
+    if cluster_id:
+        try:
+            resp = rds.describe_db_clusters(DBClusterIdentifier=cluster_id)
+            master_secret = resp["DBClusters"][0].get("MasterUserSecret", {})
+            master_secret_arn = master_secret.get("SecretArn", "")
+            if master_secret_arn:
+                logger.info("Found RDS-managed secret for %s", cluster_id)
+                return _parse_secret(sm, master_secret_arn, cluster_endpoint, engine)
+        except Exception as e:
+            logger.debug("RDS-managed secret check failed: %s", e)
+
+    # Tier 2: Convention-based lookup
+    if cluster_id:
+        convention_name = f"aurora-upgrade-planner/db-creds/{cluster_id}"
+        try:
+            return _parse_secret(sm, convention_name, cluster_endpoint, engine)
+        except Exception as e:
+            logger.debug("Convention secret '%s' not found: %s", convention_name, e)
+
+    # Tier 3: Legacy single env var
+    if DB_SECRET_ARN:
+        try:
+            return _parse_secret(sm, DB_SECRET_ARN, cluster_endpoint, engine)
+        except Exception as e:
+            logger.warning("DB_SECRET_ARN lookup failed: %s", e)
+
+    return None
+
+
+def _parse_secret(sm, secret_id, cluster_endpoint, engine):
+    """Parse a Secrets Manager secret into connection credentials."""
+    secret = json.loads(sm.get_secret_value(SecretId=secret_id)["SecretString"])
+    return {
+        "host": secret.get("host", cluster_endpoint),
+        "port": int(secret.get("port", 3306 if "mysql" in engine else 5432)),
+        "user": secret.get("username", secret.get("user", "admin")),
+        "password": secret.get("password", ""),
+        "dbname": secret.get("dbname", secret.get("database", "information_schema")),
+    }
 
 
 def _get_db_connection(creds, engine):
@@ -279,8 +318,9 @@ def _get_db_connection(creds, engine):
             conn = pymysql.connect(
                 host=creds["host"], port=creds["port"],
                 user=creds["user"], password=creds["password"],
-                database=creds["dbname"], connect_timeout=10,
+                database=creds["dbname"], connect_timeout=15,
                 autocommit=True,
+                ssl={"ca": "/etc/pki/tls/certs/ca-bundle.crt"},
             )
             return conn, conn.cursor()
         else:
@@ -288,7 +328,8 @@ def _get_db_connection(creds, engine):
             conn = psycopg2.connect(
                 host=creds["host"], port=creds["port"],
                 user=creds["user"], password=creds["password"],
-                dbname=creds["dbname"], connect_timeout=10,
+                dbname=creds["dbname"], connect_timeout=15,
+                sslmode="require",
             )
             conn.autocommit = True
             return conn, conn.cursor()
@@ -300,17 +341,19 @@ def _get_db_connection(creds, engine):
 QUERY_TIMEOUT_SECONDS = 30  # Max execution time per query during replay
 
 
-def _replay_queries(clone_endpoint, engine, queries):
+def _replay_queries(clone_endpoint, engine, queries, source_cluster_id=""):
     """Replay baseline queries against the upgraded clone and measure results.
 
     Each query has a 30-second timeout. If exceeded, it's recorded as a
     regression (timeout) rather than blocking the entire validation.
 
-    Returns list of {queryId, digest, status, latencyMs, error}.
+    Also captures EXPLAIN output for each query to enable plan comparison.
+
+    Returns list of {queryId, digest, status, latencyMs, error, explainPlan}.
     """
-    creds = _get_db_credentials(clone_endpoint, engine)
+    creds = _get_db_credentials(clone_endpoint, engine, source_cluster_id)
     if creds:
-        creds["host"] = clone_endpoint  # Override host to point at clone
+        creds["host"] = clone_endpoint  # Override host to target the clone
     conn, cur = _get_db_connection(creds, engine)
     results = []
 
@@ -323,6 +366,7 @@ def _replay_queries(clone_endpoint, engine, queries):
                 "status": "skipped",
                 "latencyMs": 0,
                 "error": "No DB connection available",
+                "explainPlan": "",
             })
         return results
 
@@ -336,7 +380,6 @@ def _replay_queries(clone_endpoint, engine, queries):
         logger.warning("Could not set query timeout: %s", e)
 
     try:
-        # Replay all collected queries (frequency + latency combined)
         for q in queries:
             sql = q.get("sampleSql", "")
             query_id = q.get("queryId", "")
@@ -344,36 +387,54 @@ def _replay_queries(clone_endpoint, engine, queries):
 
             if not sql or not sql.strip():
                 results.append({"queryId": query_id, "digest": digest,
-                                "status": "skipped", "latencyMs": 0, "error": "No SQL"})
+                                "status": "skipped", "latencyMs": 0, "error": "No SQL",
+                                "explainPlan": ""})
                 continue
 
-            # Only replay SELECT/SHOW/EXPLAIN — never DML
+            # Only replay SELECT/SHOW/EXPLAIN/WITH — never DML
             sql_upper = sql.strip().upper()
             if not any(sql_upper.startswith(kw) for kw in ("SELECT", "SHOW", "EXPLAIN", "WITH")):
                 results.append({"queryId": query_id, "digest": digest,
-                                "status": "skipped", "latencyMs": 0, "error": "Non-SELECT skipped"})
+                                "status": "skipped", "latencyMs": 0, "error": "Non-SELECT skipped",
+                                "explainPlan": ""})
                 continue
 
+            # Capture EXPLAIN output for plan comparison
+            # SECURITY NOTE: sql originates from DB system tables (trusted source), not user input.
+            explain_plan = ""
+            if not sql_upper.startswith("SHOW") and not sql_upper.startswith("EXPLAIN"):
+                try:
+                    explain_sql = f"EXPLAIN {sql}"
+                    cur.execute(explain_sql)
+                    explain_rows = cur.fetchall()
+                    explain_plan = str(explain_rows)[:500]
+                except Exception:
+                    pass  # Non-critical — some queries can't be EXPLAINed
+
+            # Execute the actual query
+            # SECURITY NOTE: sql comes from performance_schema.events_statements_summary_by_digest
+            # or pg_stat_statements — AWS-managed system tables, not user input.
+            # Only SELECT/SHOW/EXPLAIN/WITH are replayed (DML filtered above).
             try:
                 start = time.time()
                 cur.execute(sql)
                 cur.fetchall()
                 elapsed_ms = (time.time() - start) * 1000
                 results.append({"queryId": query_id, "digest": digest,
-                                "status": "pass", "latencyMs": round(elapsed_ms, 2), "error": ""})
+                                "status": "pass", "latencyMs": round(elapsed_ms, 2), "error": "",
+                                "explainPlan": explain_plan})
             except Exception as e:
                 elapsed_ms = (time.time() - start) * 1000
                 error_str = str(e)[:200]
-                # Detect timeout vs syntax/runtime failure.
-                # Subtract 500ms buffer to account for measurement overhead.
                 if elapsed_ms >= (QUERY_TIMEOUT_SECONDS * 1000 - 500):
                     results.append({"queryId": query_id, "digest": digest,
                                     "status": "timeout", "latencyMs": round(elapsed_ms, 2),
-                                    "error": f"Query exceeded {QUERY_TIMEOUT_SECONDS}s timeout"})
+                                    "error": f"Query exceeded {QUERY_TIMEOUT_SECONDS}s timeout",
+                                    "explainPlan": explain_plan})
                 else:
                     results.append({"queryId": query_id, "digest": digest,
                                     "status": "fail", "latencyMs": round(elapsed_ms, 2),
-                                    "error": error_str})
+                                    "error": error_str, "explainPlan": explain_plan})
     finally:
         try:
             cur.close()
@@ -381,10 +442,11 @@ def _replay_queries(clone_endpoint, engine, queries):
         except Exception:
             pass
 
-    logger.info("Query replay: %d total, %d pass, %d fail, %d skipped",
+    logger.info("Query replay: %d total, %d pass, %d fail, %d timeout, %d skipped",
                 len(results),
                 sum(1 for r in results if r["status"] == "pass"),
                 sum(1 for r in results if r["status"] == "fail"),
+                sum(1 for r in results if r["status"] == "timeout"),
                 sum(1 for r in results if r["status"] == "skipped"))
     return results
 

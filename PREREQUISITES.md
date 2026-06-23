@@ -110,7 +110,7 @@ This document is intended for the customer's security team to review and approve
 ## 6. Security Controls
 
 - All RDS write operations scoped to `aurora-planner-test-*` resource names
-- Clone clusters are automatically deleted after validation (Step Functions guarantees cleanup on all failure paths)
+- Clone clusters are automatically deleted after validation (Step Functions provides cleanup on all failure paths)
 - All AgentCore prompts include safety constraints (read-only analysis, no executable commands)
 - DynamoDB TTL auto-expires run records after 90 days
 - No secrets stored in environment variables or code

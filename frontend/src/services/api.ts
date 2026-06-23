@@ -1,4 +1,4 @@
-import { API_URL } from '../config';
+import { API_URL, API_KEY } from '../config';
 import type {
   AgentRun,
   AuroraCluster,
@@ -20,8 +20,12 @@ import type {
 } from '../types';
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (API_KEY) {
+    headers['x-api-key'] = API_KEY;
+  }
   const res = await fetch(`${API_URL}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     ...options,
   });
   if (!res.ok) {

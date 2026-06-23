@@ -18,7 +18,7 @@ AI-powered tool that automates Aurora MySQL and PostgreSQL upgrade readiness ass
 - **Pipeline**: 8 Lambda functions for deterministic steps, orchestrated by Step Functions
 - **AI**: Amazon Bedrock AgentCore — 3 agents (catalog extraction, code enrichment, report generation)
 - **Storage**: DynamoDB (run records, findings, settings), S3 (reports, catalog), Secrets Manager (GitHub token)
-- **Orchestration**: Step Functions with guaranteed clone cleanup on all failure paths
+- **Orchestration**: Step Functions with clone cleanup on all failure paths
 
 ![Architecture](docs/Upgrade Assistant Architecture.png)
 
@@ -51,7 +51,7 @@ No direct Bedrock API calls — all AI inference goes through AgentCore.
 - AWS CLI v2 configured with admin or PowerUser credentials
 - Node.js 20+ and npm 9+
 - Python 3.12+
-- AgentCore CLI (`npm install -g @aws/agentcore`)
+- AgentCore CLI (see [AgentCore documentation](https://docs.aws.amazon.com/bedrock-agentcore/) for installation)
 - A VPC with subnets (for RDS clone operations)
 - Amazon Bedrock model access enabled (Claude Haiku 4.5, Claude Sonnet 4.5)
 
@@ -103,7 +103,7 @@ infra/
 
 - All upgrade operations run on **clones only** — production clusters are never modified
 - IAM write permissions scoped to `aurora-planner-test-*` resource names
-- Step Functions guarantees clone cleanup on every execution path (including failures)
+- Step Functions provides clone cleanup on every execution path (including failures)
 - All AgentCore prompts include safety constraints (read-only analysis, no executable commands)
 - GitHub tokens stored in Secrets Manager — never in logs, API responses, or DynamoDB
 - Query replay executes only SELECT/SHOW/EXPLAIN — never DML, with 30s per-query timeout

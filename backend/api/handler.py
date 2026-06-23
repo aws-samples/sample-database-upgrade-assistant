@@ -255,8 +255,8 @@ def handle_databases(event):
             "error": code, "message": msg,
         })
     except Exception as e:
-        logger.error("Error listing databases: %s", e)
-        return _response(500, {"error": "Failed to list databases", "message": str(e)})
+        logger.error("Error listing databases for account")
+        return _response(500, {"error": "Failed to list databases", "message": "Internal error during database discovery"})
 
 
 def _enrich_upgrade_readiness(clusters):
@@ -1565,6 +1565,7 @@ def handle_upgrade_test_run(event):
         payload = {
             "runId": run_id,
             "clusterArn": cluster_arn,
+            "engine": source_engine,
             "targetVersion": target_version,
             "upgradeStrategy": strategy,
             "cloneMode": clone_mode,

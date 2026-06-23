@@ -23,6 +23,7 @@ docs/*.mmd
 docs/*.drawio
 docs/*.docx
 docs/*.txt
+docs/*.html
 
 # Deployment state
 .deploy-state

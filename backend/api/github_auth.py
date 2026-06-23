@@ -269,8 +269,7 @@ def handle_initiate_device_flow(event):
         with urllib.request.urlopen(req) as resp:
             gh_response = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        logger.error("GitHub device/code request failed: %s %s", e.code, body)
+        logger.error("GitHub device/code request failed: HTTP %s", e.code)
         return _response(502, {
             "error": f"GitHub returned HTTP {e.code}",
         })
@@ -335,8 +334,7 @@ def handle_poll_token(event):
         with urllib.request.urlopen(req) as resp:
             gh_response = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8", errors="replace")
-        logger.error("GitHub access_token request failed: %s %s", e.code, error_body)
+        logger.error("GitHub access_token request failed: HTTP %s", e.code)
         return _response(502, {
             "error": f"GitHub returned HTTP {e.code}",
         })

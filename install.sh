@@ -70,7 +70,7 @@ command -v aws >/dev/null 2>&1 || MISSING="$MISSING aws-cli"
 command -v node >/dev/null 2>&1 || MISSING="$MISSING node"
 command -v npm >/dev/null 2>&1 || MISSING="$MISSING npm"
 command -v zip >/dev/null 2>&1 || MISSING="$MISSING zip"
-command -v agentcore >/dev/null 2>&1 || MISSING="$MISSING agentcore-cli(npm install -g @aws/agentcore)"
+command -v agentcore >/dev/null 2>&1 || MISSING="$MISSING agentcore-cli(npm install -g @aws/agentcore@latest)"
 if [ -n "$MISSING" ]; then
   echo "ERROR: Missing:$MISSING"; exit 1
 fi
@@ -154,7 +154,12 @@ deploy_stack aurora-upgrade-planner-frontend-api \
 
 API_URL=$(get_output aurora-upgrade-planner-frontend-api ApiGatewayURL)
 WS_URL=$(get_output aurora-upgrade-planner-frontend-api WebSocketURL)
+API_KEY_ID=$(get_output aurora-upgrade-planner-frontend-api ApiKeyId)
+API_KEY=$(aws apigateway get-api-key $AWS_PROFILE_OPT --api-key "$API_KEY_ID" --include-value --query 'value' --output text --region "$REGION" 2>/dev/null || echo "")
 echo "  API: $API_URL"
+if [ -n "$API_KEY" ]; then
+  echo "  API Key: (retrieved successfully)"
+fi
 
 echo ""
 echo ">>> Packaging Lambda functions (ZIP)..."
@@ -173,11 +178,11 @@ echo "  API Lambda updated."
 
 # Pipeline Lambdas (shared package + DB drivers)
 pushd "$BUILD_DIR" > /dev/null
-pip install pymysql psycopg2-binary -t . --quiet 2>/dev/null || echo "  (pip install for DB drivers skipped — query replay may be unavailable)"
+pip install pymysql==1.1.2 psycopg2-binary==2.9.9 -t . --quiet --platform manylinux2014_x86_64 --python-version 3.12 --only-binary=:all: 2>/dev/null || pip3 install pymysql==1.1.2 psycopg2-binary==2.9.9 -t . --quiet --platform manylinux2014_x86_64 --python-version 3.12 --only-binary=:all: 2>/dev/null || echo "  (pip install for DB drivers skipped — query replay may be unavailable)"
 zip -r /tmp/rds-ua-lambdas.zip shared/ agentcore/ lambdas/ pymysql* psycopg2* > /dev/null 2>&1
 popd > /dev/null
 
-for FUNC in deprecation code-analysis baseline clone poller upgrade validation cleanup; do
+for FUNC in deprecation code-analysis baseline clone poll-status upgrade validation cleanup; do
   echo "  Updating aurora-upgrade-planner-$FUNC..."
   aws lambda update-function-code $AWS_PROFILE_OPT \
     --function-name "aurora-upgrade-planner-$FUNC" \
@@ -258,7 +263,7 @@ echo ""
 echo ">>> Building frontend..."
 pushd frontend > /dev/null
 npm install --silent
-VITE_API_URL="$API_URL" VITE_WS_URL="$WS_URL" npm run build
+VITE_API_URL="$API_URL" VITE_WS_URL="$WS_URL" VITE_API_KEY="$API_KEY" npm run build
 popd > /dev/null
 
 echo ">>> Deploying frontend to S3..."

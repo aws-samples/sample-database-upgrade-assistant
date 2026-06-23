@@ -32,10 +32,19 @@ rds = boto3.client("rds", region_name=REGION)
 def handler(event, context):
     """Lambda entry point."""
     run_id = event["runId"]
-    cluster_arn = event["clusterArn"]
-    engine = event.get("engine", "aurora-mysql")
+    cluster_arn = event.get("clusterArn", "")
+    engine = event.get("engine", "")
     current_version = event.get("currentVersion", "")
     clone_mode = event.get("cloneMode", "clone")
+
+    # If engine/clusterArn not in event, read from run state
+    if not cluster_arn or not engine:
+        from shared.state import get_run
+        run = get_run(run_id)
+        if run:
+            cluster_arn = cluster_arn or run.get("clusterArn", "")
+            engine = engine or run.get("engine", "aurora-mysql")
+            current_version = current_version or run.get("sourceVersion", "")
 
     short_id = run_id[:8]
     clone_id = f"aurora-planner-test-{short_id}"

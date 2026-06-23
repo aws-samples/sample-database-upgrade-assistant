@@ -19,12 +19,54 @@ Parameters:
 
   SubnetIds:
     Type: CommaDelimitedList
-    Description: Comma-separated list of subnet IDs
+    Description: Comma-separated list of private subnet IDs (must have NAT Gateway route for outbound internet)
 
 # ============================================================================
 # Resources
 # ============================================================================
 Resources:
+
+  # --------------------------------------------------------------------------
+  # KMS Key for DynamoDB Encryption
+  # --------------------------------------------------------------------------
+  DynamoDBKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for RDS Upgrade Assistant DynamoDB encryption
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: RootAccountAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:Delete*
+              - kms:TagResource
+              - kms:UntagResource
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+              - kms:GenerateDataKey
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:ReEncrypt*
+            Resource: '*'
+      EnableKeyRotation: true
+
+  DynamoDBKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/aurora-upgrade-planner-dynamodb
+      TargetKeyId: !Ref DynamoDBKMSKey
 
   # --------------------------------------------------------------------------
   # DynamoDB Tables
@@ -64,6 +106,12 @@ Resources:
               KeyType: HASH
           Projection:
             ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !GetAtt DynamoDBKMSKey.Arn
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
 
   FindingsTable:
     Type: AWS::DynamoDB::Table
@@ -80,6 +128,12 @@ Resources:
           KeyType: HASH
         - AttributeName: findingId
           KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !GetAtt DynamoDBKMSKey.Arn
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
 
   ProgressEventsTable:
     Type: AWS::DynamoDB::Table
@@ -101,6 +155,12 @@ Resources:
         Enabled: true
       StreamSpecification:
         StreamViewType: NEW_IMAGE
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !GetAtt DynamoDBKMSKey.Arn
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
 
   ConnectionsTable:
     Type: AWS::DynamoDB::Table
@@ -116,6 +176,12 @@ Resources:
       TimeToLiveSpecification:
         AttributeName: expiresAt
         Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !GetAtt DynamoDBKMSKey.Arn
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
 
   SettingsTable:
     Type: AWS::DynamoDB::Table
@@ -128,18 +194,116 @@ Resources:
       KeySchema:
         - AttributeName: settingKey
           KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !GetAtt DynamoDBKMSKey.Arn
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # --------------------------------------------------------------------------
+  # SQS Dead Letter Queue for Lambda Functions
+  # --------------------------------------------------------------------------
+  LambdaDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: aurora-upgrade-planner-lambda-dlq
+      MessageRetentionPeriod: 1209600
+      KmsMasterKeyId: alias/aws/sqs
+
+  # --------------------------------------------------------------------------
+  # Security Group for Lambda Functions (VPC)
+  # --------------------------------------------------------------------------
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for RDS Upgrade Assistant Lambda functions
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS outbound (AWS APIs, Bedrock, GitHub)
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: 0.0.0.0/0
+          Description: MySQL (Aurora clone connectivity)
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 0.0.0.0/0
+          Description: PostgreSQL (Aurora clone connectivity)
 
   # --------------------------------------------------------------------------
   # S3 Buckets
   # --------------------------------------------------------------------------
-  ReportBucket:
+  LoggingBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub aurora-upgrade-planner-reports-${AWS::AccountId}-${AWS::Region}
+      BucketName: !Sub aurora-upgrade-planner-logs-${AWS::AccountId}-${AWS::Region}
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireLogs
+            Status: Enabled
+            ExpirationInDays: 90
+
+  LoggingBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LoggingBucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyNonHTTPS
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:ListBucket
+              - s3:DeleteObject
+            Resource:
+              - !GetAtt LoggingBucket.Arn
+              - !Sub ${LoggingBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+          - Sid: AllowS3Logging
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub ${LoggingBucket.Arn}/*
+
+  ReportBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub aurora-upgrade-planner-reports-${AWS::AccountId}-${AWS::Region}
+      ObjectLockEnabled: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LoggingBucket
+        LogFilePrefix: report-bucket/
       LifecycleConfiguration:
         Rules:
           - Id: TransitionToIntelligentTiering
@@ -169,6 +333,16 @@ Resources:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub aurora-upgrade-planner-frontend-${AWS::AccountId}-${AWS::Region}
+      ObjectLockEnabled: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LoggingBucket
+        LogFilePrefix: frontend-bucket/
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -188,6 +362,41 @@ Resources:
               CanonicalUser: !GetAtt CloudFrontOAI.S3CanonicalUserId
             Action: s3:GetObject
             Resource: !Sub ${FrontendBucket.Arn}/*
+          - Sid: DenyNonHTTPS
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:ListBucket
+              - s3:DeleteObject
+            Resource:
+              - !GetAtt FrontendBucket.Arn
+              - !Sub ${FrontendBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  ReportBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ReportBucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyNonHTTPS
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:ListBucket
+              - s3:DeleteObject
+            Resource:
+              - !GetAtt ReportBucket.Arn
+              - !Sub ${ReportBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
 
   # --------------------------------------------------------------------------
   # CloudFront Distribution
@@ -220,6 +429,13 @@ Resources:
             - HEAD
           ForwardedValues:
             QueryString: false
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+          MinimumProtocolVersion: TLSv1.2_2021
+        Logging:
+          Bucket: !GetAtt LoggingBucket.DomainName
+          IncludeCookies: false
+          Prefix: cloudfront/
         CustomErrorResponses:
           - ErrorCode: 403
             ResponseCode: 200
@@ -244,120 +460,156 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
-      Policies:
-        - PolicyName: LambdaPolicy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Sid: CloudWatchLogs
-                Effect: Allow
-                Action:
-                  - logs:CreateLogGroup
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/aurora-upgrade-planner-*
-              - Sid: S3ReadWrite
-                Effect: Allow
-                Action:
-                  - s3:GetObject
-                  - s3:PutObject
-                  - s3:ListBucket
-                  - s3:HeadObject
-                Resource:
-                  - !GetAtt ReportBucket.Arn
-                  - !Sub ${ReportBucket.Arn}/*
-              - Sid: DynamoDBCRUD
-                Effect: Allow
-                Action:
-                  - dynamodb:PutItem
-                  - dynamodb:GetItem
-                  - dynamodb:UpdateItem
-                  - dynamodb:DeleteItem
-                  - dynamodb:Query
-                  - dynamodb:Scan
-                Resource:
-                  - !GetAtt RunsTable.Arn
-                  - !Sub ${RunsTable.Arn}/index/*
-                  - !GetAtt FindingsTable.Arn
-                  - !GetAtt ProgressEventsTable.Arn
-                  - !GetAtt ConnectionsTable.Arn
-                  - !GetAtt SettingsTable.Arn
-              - Sid: RDSReadOnly
-                Effect: Allow
-                Action:
-                  - rds:DescribeDBEngineVersions
-                  - rds:DescribeDBClusters
-                  - rds:DescribeDBInstances
-                  - rds:DescribeDBClusterParameters
-                  - rds:DescribeDBClusterSnapshots
-                Resource: '*'
-              - Sid: RDSCloneAndUpgrade
-                Effect: Allow
-                Action:
-                  - rds:RestoreDBClusterToPointInTime
-                  - rds:RestoreDBClusterFromSnapshot
-                  - rds:CopyDBClusterSnapshot
-                Resource:
-                  - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:*
-                  - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:subgrp:*
-                  - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster-snapshot:*
-              - Sid: RDSWriteOnClones
-                Effect: Allow
-                Action:
-                  - rds:CreateDBInstance
-                  - rds:ModifyDBCluster
-                  - rds:DeleteDBCluster
-                  - rds:DeleteDBInstance
-                  - rds:DeleteDBClusterSnapshot
-                  - rds:AddTagsToResource
-                Resource:
-                  - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:aurora-planner-test-*
-                  - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:aurora-planner-test-*
-                  - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster-snapshot:aurora-planner-*
-                  - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster-pg:*
-                  - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:pg:*
-              - Sid: PerformanceInsights
-                Effect: Allow
-                Action:
-                  - pi:GetResourceMetrics
-                Resource: '*'
-              - Sid: LambdaInvoke
-                Effect: Allow
-                Action:
-                  - lambda:InvokeFunction
-                Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:aurora-upgrade-planner-*
-              - Sid: StepFunctionsStart
-                Effect: Allow
-                Action:
-                  - states:StartExecution
-                Resource: !GetAtt UpgradeTestStateMachine.Arn
-              - Sid: STSAssumeRole
-                Effect: Allow
-                Action:
-                  - sts:AssumeRole
-                  - sts:GetCallerIdentity
-                Resource: !Sub arn:aws:iam::*:role/aurora-upgrade-planner-cross-account-role
-              - Sid: BedrockListModels
-                Effect: Allow
-                Action:
-                  - bedrock:ListFoundationModels
-                Resource: '*'
-              - Sid: AgentCoreInvoke
-                Effect: Allow
-                Action:
-                  - bedrock-agentcore:InvokeAgentRuntime
-                Resource:
-                  - !Sub arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:runtime/*
-              - Sid: SecretsManagerGitHub
-                Effect: Allow
-                Action:
-                  - secretsmanager:GetSecretValue
-                  - secretsmanager:PutSecretValue
-                  - secretsmanager:CreateSecret
-                  - secretsmanager:DeleteSecret
-                  - secretsmanager:DescribeSecret
-                Resource:
-                  - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:aurora-upgrade-planner/github-token*
+      ManagedPolicyArns:
+        - !Ref LambdaExecutionPolicy
+
+  LambdaExecutionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: aurora-upgrade-planner-lambda-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: CloudWatchLogs
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/aurora-upgrade-planner-*
+          - Sid: S3ReadWrite
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:ListBucket
+              - s3:HeadObject
+            Resource:
+              - !GetAtt ReportBucket.Arn
+              - !Sub ${ReportBucket.Arn}/*
+          - Sid: DynamoDBCRUD
+            Effect: Allow
+            Action:
+              - dynamodb:PutItem
+              - dynamodb:GetItem
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteItem
+              - dynamodb:Query
+              - dynamodb:Scan
+            Resource:
+              - !GetAtt RunsTable.Arn
+              - !Sub ${RunsTable.Arn}/index/*
+              - !GetAtt FindingsTable.Arn
+              - !GetAtt ProgressEventsTable.Arn
+              - !GetAtt ConnectionsTable.Arn
+              - !GetAtt SettingsTable.Arn
+          - Sid: KMSDecryptForDynamoDB
+            Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:GenerateDataKey
+            Resource: !GetAtt DynamoDBKMSKey.Arn
+          - Sid: RDSReadOnly
+            Effect: Allow
+            Action:
+              - rds:DescribeDBEngineVersions
+              - rds:DescribeDBClusters
+              - rds:DescribeDBInstances
+              - rds:DescribeDBClusterParameters
+              - rds:DescribeDBClusterSnapshots
+            Resource: '*'
+          - Sid: RDSCloneAndUpgrade
+            Effect: Allow
+            Action:
+              - rds:RestoreDBClusterToPointInTime
+              - rds:RestoreDBClusterFromSnapshot
+              - rds:CopyDBClusterSnapshot
+            Resource:
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:subgrp:*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster-snapshot:*
+          - Sid: RDSWriteOnClones
+            Effect: Allow
+            Action:
+              - rds:CreateDBInstance
+              - rds:ModifyDBCluster
+              - rds:DeleteDBCluster
+              - rds:DeleteDBInstance
+              - rds:DeleteDBClusterSnapshot
+              - rds:AddTagsToResource
+            Resource:
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:aurora-planner-test-*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:aurora-planner-test-*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster-snapshot:aurora-planner-*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster-pg:aurora-planner-*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster-pg:default.*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:pg:aurora-planner-*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:pg:default.*
+          - Sid: PerformanceInsights
+            Effect: Allow
+            Action:
+              - pi:GetResourceMetrics
+            Resource: '*'
+          - Sid: LambdaInvoke
+            Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:aurora-upgrade-planner-*
+          - Sid: StepFunctionsStart
+            Effect: Allow
+            Action:
+              - states:StartExecution
+            Resource: !GetAtt UpgradeTestStateMachine.Arn
+          - Sid: STSAssumeRole
+            Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Resource: !Sub arn:aws:iam::*:role/aurora-upgrade-planner-cross-account-role
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId
+          - Sid: STSIdentity
+            Effect: Allow
+            Action:
+              - sts:GetCallerIdentity
+            Resource: '*'
+          - Sid: BedrockListModels
+            Effect: Allow
+            Action:
+              - bedrock:ListFoundationModels
+            Resource: '*'
+          - Sid: AgentCoreInvoke
+            Effect: Allow
+            Action:
+              - bedrock-agentcore:InvokeAgentRuntime
+            Resource:
+              - !Sub arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:runtime/*
+          - Sid: SecretsManagerGitHub
+            Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+              - secretsmanager:PutSecretValue
+              - secretsmanager:CreateSecret
+              - secretsmanager:DeleteSecret
+              - secretsmanager:DescribeSecret
+            Resource:
+              - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:aurora-upgrade-planner/*
+          - Sid: SQSDLQWrite
+            Effect: Allow
+            Action:
+              - sqs:SendMessage
+            Resource: !GetAtt LambdaDLQ.Arn
+          - Sid: VPCNetworkInterfaces
+            # Resource: '*' is required for Lambda VPC attachment — ENI ARNs are
+            # assigned at runtime and cannot be scoped at deploy time.
+            # See: https://docs.aws.amazon.com/lambda/latest/dg/configuration-vpc.html
+            Effect: Allow
+            Action:
+              - ec2:CreateNetworkInterface
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DeleteNetworkInterface
+            Resource: '*'
 
   # --------------------------------------------------------------------------
   # Step Functions State Machine
@@ -373,14 +625,19 @@ Resources:
             Principal:
               Service: states.amazonaws.com
             Action: sts:AssumeRole
-      Policies:
-        - PolicyName: InvokeLambdas
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: lambda:InvokeFunction
-                Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:aurora-upgrade-planner-*
+      ManagedPolicyArns:
+        - !Ref StepFunctionsPolicy
+
+  StepFunctionsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: aurora-upgrade-planner-sfn-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: lambda:InvokeFunction
+            Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:aurora-upgrade-planner-*
 
   UpgradeTestStateMachine:
     Type: AWS::StepFunctions::StateMachine
@@ -403,9 +660,14 @@ Resources:
                 {
                   "ErrorEquals": ["States.ALL"],
                   "ResultPath": "$.error",
-                  "Next": "Cleanup"
+                  "Next": "BaselineFailed"
                 }
               ]
+            },
+            "BaselineFailed": {
+              "Type": "Pass",
+              "Comment": "Baseline failed before clone was created — no cleanup needed",
+              "End": true
             },
             "Clone": {
               "Type": "Task",
@@ -418,9 +680,19 @@ Resources:
                 {
                   "ErrorEquals": ["States.ALL"],
                   "ResultPath": "$.error",
-                  "Next": "Cleanup"
+                  "Next": "CloneCreateFailed"
                 }
               ]
+            },
+            "CloneCreateFailed": {
+              "Type": "Pass",
+              "Comment": "Clone creation threw an error. Pass runId so Cleanup can look up cloneId from DynamoDB.",
+              "Parameters": {
+                "runId.$": "$.stepResult.runId",
+                "cloneId": ""
+              },
+              "ResultPath": "$.stepResult",
+              "Next": "Cleanup"
             },
             "InitClonePollCount": {
               "Type": "Pass",
@@ -483,14 +755,16 @@ Resources:
               "Default": "WaitForClone"
             },
             "CloneFailed": {
-              "Type": "Fail",
-              "Error": "CloneFailed",
-              "Cause": "Clone cluster entered failed or deleting state"
+              "Type": "Pass",
+              "Result": {"error": "CloneFailed", "cause": "Clone cluster entered failed or deleting state"},
+              "ResultPath": "$.failureInfo",
+              "Next": "Cleanup"
             },
             "CloneTimeout": {
-              "Type": "Fail",
-              "Error": "CloneTimeout",
-              "Cause": "Clone did not become available within 60 minutes"
+              "Type": "Pass",
+              "Result": {"error": "CloneTimeout", "cause": "Clone did not become available within 60 minutes"},
+              "ResultPath": "$.failureInfo",
+              "Next": "Cleanup"
             },
             "Upgrade": {
               "Type": "Task",
@@ -571,14 +845,16 @@ Resources:
               "Default": "WaitForUpgrade"
             },
             "UpgradeFailed": {
-              "Type": "Fail",
-              "Error": "UpgradeFailed",
-              "Cause": "Upgrade cluster entered failed or deleting state"
+              "Type": "Pass",
+              "Result": {"error": "UpgradeFailed", "cause": "Upgrade cluster entered failed or deleting state"},
+              "ResultPath": "$.failureInfo",
+              "Next": "Cleanup"
             },
             "UpgradeTimeout": {
-              "Type": "Fail",
-              "Error": "UpgradeTimeout",
-              "Cause": "Upgrade did not complete within 60 minutes"
+              "Type": "Pass",
+              "Result": {"error": "UpgradeTimeout", "cause": "Upgrade did not complete within 60 minutes"},
+              "ResultPath": "$.failureInfo",
+              "Next": "Cleanup"
             },
             "Validation": {
               "Type": "Task",
@@ -606,7 +882,18 @@ Resources:
                 "cloneId.$": "$.stepResult.cloneId"
               },
               "TimeoutSeconds": 900,
-              "End": true
+              "End": true,
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "CleanupFailed"
+                }
+              ]
+            },
+            "CleanupFailed": {
+              "Type": "Fail",
+              "Error": "CleanupFailed",
+              "Cause": "Cleanup Lambda failed — manual clone deletion may be required"
             }
           }
         }
@@ -623,6 +910,13 @@ Resources:
       Role: !GetAtt LambdaExecutionRole.Arn
       Timeout: 900
       MemorySize: 512
+      ReservedConcurrentExecutions: 5
+      DeadLetterConfig:
+        TargetArn: !GetAtt LambdaDLQ.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds: !Ref SubnetIds
       Environment:
         Variables:
           DYNAMODB_TABLE_PREFIX: aurora-upgrade-planner-
@@ -640,6 +934,13 @@ Resources:
       Role: !GetAtt LambdaExecutionRole.Arn
       Timeout: 900
       MemorySize: 1024
+      ReservedConcurrentExecutions: 5
+      DeadLetterConfig:
+        TargetArn: !GetAtt LambdaDLQ.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds: !Ref SubnetIds
       Environment:
         Variables:
           DYNAMODB_TABLE_PREFIX: aurora-upgrade-planner-
@@ -657,6 +958,13 @@ Resources:
       Role: !GetAtt LambdaExecutionRole.Arn
       Timeout: 300
       MemorySize: 256
+      ReservedConcurrentExecutions: 5
+      DeadLetterConfig:
+        TargetArn: !GetAtt LambdaDLQ.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds: !Ref SubnetIds
       Environment:
         Variables:
           DYNAMODB_TABLE_PREFIX: aurora-upgrade-planner-
@@ -673,6 +981,13 @@ Resources:
       Role: !GetAtt LambdaExecutionRole.Arn
       Timeout: 300
       MemorySize: 256
+      ReservedConcurrentExecutions: 5
+      DeadLetterConfig:
+        TargetArn: !GetAtt LambdaDLQ.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds: !Ref SubnetIds
       Environment:
         Variables:
           DYNAMODB_TABLE_PREFIX: aurora-upgrade-planner-
@@ -689,6 +1004,13 @@ Resources:
       Role: !GetAtt LambdaExecutionRole.Arn
       Timeout: 300
       MemorySize: 256
+      ReservedConcurrentExecutions: 5
+      DeadLetterConfig:
+        TargetArn: !GetAtt LambdaDLQ.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds: !Ref SubnetIds
       Environment:
         Variables:
           DYNAMODB_TABLE_PREFIX: aurora-upgrade-planner-
@@ -705,6 +1027,13 @@ Resources:
       Role: !GetAtt LambdaExecutionRole.Arn
       Timeout: 900
       MemorySize: 512
+      ReservedConcurrentExecutions: 5
+      DeadLetterConfig:
+        TargetArn: !GetAtt LambdaDLQ.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds: !Ref SubnetIds
       Environment:
         Variables:
           DYNAMODB_TABLE_PREFIX: aurora-upgrade-planner-
@@ -722,6 +1051,13 @@ Resources:
       Role: !GetAtt LambdaExecutionRole.Arn
       Timeout: 600
       MemorySize: 256
+      ReservedConcurrentExecutions: 5
+      DeadLetterConfig:
+        TargetArn: !GetAtt LambdaDLQ.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds: !Ref SubnetIds
       Environment:
         Variables:
           DYNAMODB_TABLE_PREFIX: aurora-upgrade-planner-
@@ -738,6 +1074,13 @@ Resources:
       Role: !GetAtt LambdaExecutionRole.Arn
       Timeout: 30
       MemorySize: 128
+      ReservedConcurrentExecutions: 5
+      DeadLetterConfig:
+        TargetArn: !GetAtt LambdaDLQ.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds: !Ref SubnetIds
       Environment:
         Variables:
           DYNAMODB_TABLE_PREFIX: aurora-upgrade-planner-
@@ -790,3 +1133,15 @@ Outputs:
     Value: !GetAtt ProgressEventsTable.StreamArn
     Export:
       Name: !Sub ${AWS::StackName}-ProgressEventsStreamArn
+  LambdaDLQArn:
+    Value: !GetAtt LambdaDLQ.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-LambdaDLQArn
+  LambdaSecurityGroupId:
+    Value: !Ref LambdaSecurityGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-LambdaSecurityGroupId
+  DynamoDBKMSKeyArn:
+    Value: !GetAtt DynamoDBKMSKey.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-DynamoDBKMSKeyArn

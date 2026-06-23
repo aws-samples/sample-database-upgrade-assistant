@@ -2,11 +2,12 @@
 
 Triggered by: Step Functions (after clone is ready via Poller)
 Input: {runId, cloneId}
-Output: Calls ModifyDBCluster with appropriate PG, returns payload for polling
+Output: Calls ModifyDBCluster with target default PG, returns payload for polling
 
-Handles both Aurora MySQL and Aurora PostgreSQL:
-  - MySQL: Updates cluster PG first, then ModifyDBCluster with AllowMajorVersionUpgrade
-  - PostgreSQL: ModifyDBCluster with PG in a single call
+Handles both Aurora MySQL and Aurora PostgreSQL via a single ModifyDBCluster call
+that includes the target default parameter group (e.g. default.aurora-mysql8.0).
+This avoids InvalidParameterCombination errors when the source cluster uses a
+custom parameter group.
 """
 
 import logging
@@ -14,14 +15,13 @@ import os
 import sys
 
 import boto3
-from botocore.exceptions import ClientError
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from shared.config import REGION
-from shared.state import get_run, update_phase, update_run, mark_failed
+from shared.state import get_run, update_phase, mark_failed
 
 rds = boto3.client("rds", region_name=REGION)
 
@@ -59,36 +59,19 @@ def handler(event, context):
         logger.info("Upgrading %s (%s) → %s (target PG: %s)",
                     clone_id, engine, target_version, target_pg)
 
-        if "mysql" in engine:
-            # Aurora MySQL: update cluster PG first, then upgrade
-            if target_pg:
-                try:
-                    rds.modify_db_cluster(
-                        DBClusterIdentifier=clone_id,
-                        DBClusterParameterGroupName=target_pg,
-                        ApplyImmediately=True,
-                    )
-                    logger.info("Cluster PG updated to %s", target_pg)
-                except Exception as e:
-                    logger.warning("Could not update cluster PG (non-fatal): %s", e)
+        # Wait for cluster to be fully available (may be in transitional state)
+        _wait_for_available(clone_id)
 
-            rds.modify_db_cluster(
-                DBClusterIdentifier=clone_id,
-                EngineVersion=target_version,
-                AllowMajorVersionUpgrade=True,
-                ApplyImmediately=True,
-            )
-        else:
-            # Aurora PostgreSQL: upgrade with PG in a single call
-            modify_kwargs = {
-                "DBClusterIdentifier": clone_id,
-                "EngineVersion": target_version,
-                "AllowMajorVersionUpgrade": True,
-                "ApplyImmediately": True,
-            }
-            if target_pg:
-                modify_kwargs["DBClusterParameterGroupName"] = target_pg
-            rds.modify_db_cluster(**modify_kwargs)
+        # Both MySQL and PostgreSQL: single ModifyDBCluster call with target PG
+        modify_kwargs = {
+            "DBClusterIdentifier": clone_id,
+            "EngineVersion": target_version,
+            "AllowMajorVersionUpgrade": True,
+            "ApplyImmediately": True,
+        }
+        if target_pg:
+            modify_kwargs["DBClusterParameterGroupName"] = target_pg
+        rds.modify_db_cluster(**modify_kwargs)
 
         logger.info("ModifyDBCluster submitted for %s → %s", clone_id, target_version)
 
@@ -120,3 +103,34 @@ def _get_default_pg_for_version(engine, version):
     except Exception as e:
         logger.warning("Could not determine default PG for %s %s: %s", engine, version, e)
         return ""
+
+
+def _wait_for_available(clone_id, max_wait_seconds=180):
+    """Wait for the cluster to reach 'available' status before modifying.
+
+    After cloning, the cluster may briefly be in a transitional state.
+    We must wait for it to be fully available before submitting the upgrade.
+
+    Raises Exception if the cluster doesn't become available within the timeout.
+    """
+    import time
+    interval = 10
+    elapsed = 0
+    while elapsed < max_wait_seconds:
+        try:
+            resp = rds.describe_db_clusters(DBClusterIdentifier=clone_id)
+            status = resp["DBClusters"][0].get("Status", "")
+            if status == "available":
+                logger.info("Cluster %s is available (waited %ds)", clone_id, elapsed)
+                return
+            logger.info("Cluster %s status: %s — waiting... (%ds/%ds)",
+                        clone_id, status, elapsed, max_wait_seconds)
+        except Exception as e:
+            logger.warning("Error checking cluster status: %s", e)
+        time.sleep(interval)
+        elapsed += interval
+
+    raise Exception(
+        f"Cluster {clone_id} did not become available within {max_wait_seconds}s "
+        f"(last status: {status}). Cannot proceed with upgrade."
+    )

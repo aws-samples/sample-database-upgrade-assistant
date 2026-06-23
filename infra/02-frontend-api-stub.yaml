@@ -37,6 +37,7 @@ Resources:
       ResourceId: !GetAtt RestApi.RootResourceId
       HttpMethod: ANY
       AuthorizationType: NONE
+      ApiKeyRequired: true
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
@@ -56,7 +57,7 @@ Resources:
         IntegrationResponses:
           - StatusCode: '200'
             ResponseParameters:
-              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,x-api-key'"
               method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
               method.response.header.Access-Control-Allow-Origin: "'*'"
       MethodResponses:
@@ -80,6 +81,7 @@ Resources:
       ResourceId: !Ref RestApiProxyResource
       HttpMethod: ANY
       AuthorizationType: NONE
+      ApiKeyRequired: true
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
@@ -99,7 +101,7 @@ Resources:
         IntegrationResponses:
           - StatusCode: '200'
             ResponseParameters:
-              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,x-api-key'"
               method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
               method.response.header.Access-Control-Allow-Origin: "'*'"
       MethodResponses:
@@ -121,10 +123,72 @@ Resources:
 
   RestApiStage:
     Type: AWS::ApiGateway::Stage
+    DependsOn: ApiGatewayAccount
     Properties:
       RestApiId: !Ref RestApi
       DeploymentId: !Ref RestApiDeployment
       StageName: prod
+      AccessLogSetting:
+        DestinationArn: !GetAtt RestApiAccessLogGroup.Arn
+        Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","resourcePath":"$context.resourcePath","status":"$context.status","responseLength":"$context.responseLength"}'
+
+  RestApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/apigateway/aurora-upgrade-planner-api-access
+      RetentionInDays: 30
+
+  ApiGatewayCloudWatchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aurora-upgrade-planner-apigw-cloudwatch-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    DependsOn: RestApi
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiGatewayCloudWatchRole.Arn
+
+  # --------------------------------------------------------------------------
+  # API Key + Usage Plan (REST API authentication)
+  # --------------------------------------------------------------------------
+  RestApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    DependsOn: RestApiStage
+    Properties:
+      Name: aurora-upgrade-planner-api-key
+      Enabled: true
+      StageKeys:
+        - RestApiId: !Ref RestApi
+          StageName: prod
+
+  RestApiUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    DependsOn: RestApiStage
+    Properties:
+      UsagePlanName: aurora-upgrade-planner-usage-plan
+      ApiStages:
+        - ApiId: !Ref RestApi
+          Stage: prod
+      Throttle:
+        BurstLimit: 50
+        RateLimit: 20
+
+  RestApiUsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref RestApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref RestApiUsagePlan
 
   # --------------------------------------------------------------------------
   # WebSocket API Gateway
@@ -208,95 +272,120 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: ApiLambdaPolicy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Sid: DynamoDBCRUD
-                Effect: Allow
-                Action:
-                  - dynamodb:PutItem
-                  - dynamodb:GetItem
-                  - dynamodb:UpdateItem
-                  - dynamodb:DeleteItem
-                  - dynamodb:Query
-                  - dynamodb:Scan
-                Resource:
-                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/aurora-upgrade-planner-*
-                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/aurora-upgrade-planner-*/index/*
-              - Sid: S3ReadWrite
-                Effect: Allow
-                Action:
-                  - s3:GetObject
-                  - s3:PutObject
-                  - s3:ListBucket
-                Resource:
-                  - !Sub
-                    - arn:aws:s3:::${BucketName}
-                    - BucketName:
-                        Fn::ImportValue: !Sub ${FoundationStackName}-ReportBucketName
-                  - !Sub
-                    - arn:aws:s3:::${BucketName}/*
-                    - BucketName:
-                        Fn::ImportValue: !Sub ${FoundationStackName}-ReportBucketName
-              - Sid: LambdaInvoke
-                Effect: Allow
-                Action:
-                  - lambda:InvokeFunction
-                Resource:
-                  - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:aurora-upgrade-planner-*
-              - Sid: StepFunctionsStart
-                Effect: Allow
-                Action:
-                  - states:StartExecution
-                Resource:
-                  - !Sub arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:aurora-upgrade-planner-*
-              - Sid: RDSDescribe
-                Effect: Allow
-                Action:
-                  - rds:DescribeDBClusters
-                  - rds:DescribeDBInstances
-                  - rds:DescribeDBClusterSnapshots
-                  - rds:DescribeEngineDefaultClusterParameters
-                Resource: '*'
-              - Sid: RDSDeleteClones
-                Effect: Allow
-                Action:
-                  - rds:DeleteDBClusterSnapshot
-                  - rds:DeleteDBCluster
-                  - rds:DeleteDBInstance
-                Resource:
-                  - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:aurora-planner-test-*
-                  - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:aurora-planner-test-*
-                  - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster-snapshot:aurora-planner-*
-              - Sid: STSAssumeRole
-                Effect: Allow
-                Action:
-                  - sts:AssumeRole
-                Resource:
-                  - !Sub arn:aws:iam::*:role/aurora-upgrade-planner-cross-account-role
-              - Sid: STSIdentity
-                Effect: Allow
-                Action:
-                  - sts:GetCallerIdentity
-                Resource: '*'
-              - Sid: IAMPassRole
-                Effect: Allow
-                Action:
-                  - iam:PassRole
-                Resource:
-                  - !Sub arn:aws:iam::${AWS::AccountId}:role/aurora-upgrade-planner-*
-              - Sid: SecretsManagerGitHub
-                Effect: Allow
-                Action:
-                  - secretsmanager:GetSecretValue
-                  - secretsmanager:PutSecretValue
-                  - secretsmanager:CreateSecret
-                  - secretsmanager:DeleteSecret
-                  - secretsmanager:DescribeSecret
-                Resource:
-                  - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:aurora-upgrade-planner/github-token*
+        - !Ref ApiLambdaPolicy
+
+  ApiLambdaPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: aurora-upgrade-planner-api-lambda-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DynamoDBCRUD
+            Effect: Allow
+            Action:
+              - dynamodb:PutItem
+              - dynamodb:GetItem
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteItem
+              - dynamodb:Query
+              - dynamodb:Scan
+            Resource:
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/aurora-upgrade-planner-*
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/aurora-upgrade-planner-*/index/*
+          - Sid: KMSDecryptForDynamoDB
+            Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:GenerateDataKey
+            Resource:
+              Fn::ImportValue: !Sub ${FoundationStackName}-DynamoDBKMSKeyArn
+          - Sid: S3ReadWrite
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:ListBucket
+            Resource:
+              - !Sub
+                - arn:aws:s3:::${BucketName}
+                - BucketName:
+                    Fn::ImportValue: !Sub ${FoundationStackName}-ReportBucketName
+              - !Sub
+                - arn:aws:s3:::${BucketName}/*
+                - BucketName:
+                    Fn::ImportValue: !Sub ${FoundationStackName}-ReportBucketName
+          - Sid: LambdaInvoke
+            Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource:
+              - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:aurora-upgrade-planner-*
+          - Sid: StepFunctionsStart
+            Effect: Allow
+            Action:
+              - states:StartExecution
+            Resource:
+              - !Sub arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:aurora-upgrade-planner-*
+          - Sid: RDSDescribe
+            Effect: Allow
+            Action:
+              - rds:DescribeDBClusters
+              - rds:DescribeDBInstances
+              - rds:DescribeDBClusterSnapshots
+              - rds:DescribeEngineDefaultClusterParameters
+            Resource: '*'
+          - Sid: RDSDeleteClones
+            Effect: Allow
+            Action:
+              - rds:DeleteDBClusterSnapshot
+              - rds:DeleteDBCluster
+              - rds:DeleteDBInstance
+            Resource:
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:aurora-planner-test-*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:aurora-planner-test-*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster-snapshot:aurora-planner-*
+          - Sid: STSAssumeRole
+            Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Resource:
+              - !Sub arn:aws:iam::*:role/aurora-upgrade-planner-cross-account-role
+          - Sid: STSIdentity
+            Effect: Allow
+            Action:
+              - sts:GetCallerIdentity
+            Resource: '*'
+          - Sid: IAMPassRole
+            Effect: Allow
+            Action:
+              - iam:PassRole
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/aurora-upgrade-planner-*
+          - Sid: SecretsManagerGitHub
+            Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+              - secretsmanager:PutSecretValue
+              - secretsmanager:CreateSecret
+              - secretsmanager:DeleteSecret
+              - secretsmanager:DescribeSecret
+            Resource:
+              - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:aurora-upgrade-planner/github-token*
+          - Sid: VPCNetworkInterfaces
+            Effect: Allow
+            Action:
+              - ec2:CreateNetworkInterface
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DeleteNetworkInterface
+            Resource: '*'
+          - Sid: SQSDLQWrite
+            Effect: Allow
+            Action:
+              - sqs:SendMessage
+            Resource:
+              Fn::ImportValue: !Sub ${FoundationStackName}-LambdaDLQArn
 
   # --------------------------------------------------------------------------
   # IAM Role — WebSocket Connect Lambda
@@ -314,20 +403,37 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: WsConnectPolicy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Sid: DynamoDBConnections
-                Effect: Allow
-                Action:
-                  - dynamodb:PutItem
-                  - dynamodb:DeleteItem
-                  - dynamodb:GetItem
-                  - dynamodb:UpdateItem
-                Resource:
-                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/aurora-upgrade-planner-connections
+        - !Ref WsConnectPolicy
+
+  WsConnectPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: aurora-upgrade-planner-ws-connect-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DynamoDBConnections
+            Effect: Allow
+            Action:
+              - dynamodb:PutItem
+              - dynamodb:DeleteItem
+              - dynamodb:GetItem
+              - dynamodb:UpdateItem
+            Resource:
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/aurora-upgrade-planner-connections
+          - Sid: VPCNetworkInterfaces
+            Effect: Allow
+            Action:
+              - ec2:CreateNetworkInterface
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DeleteNetworkInterface
+            Resource: '*'
+          - Sid: SQSDLQWrite
+            Effect: Allow
+            Action:
+              - sqs:SendMessage
+            Resource:
+              Fn::ImportValue: !Sub ${FoundationStackName}-LambdaDLQArn
 
   # --------------------------------------------------------------------------
   # IAM Role — WebSocket Fan-out Lambda
@@ -345,33 +451,50 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: WsFanoutPolicy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Sid: DynamoDBStreamsRead
-                Effect: Allow
-                Action:
-                  - dynamodb:GetRecords
-                  - dynamodb:GetShardIterator
-                  - dynamodb:DescribeStream
-                  - dynamodb:ListStreams
-                Resource:
-                  - Fn::ImportValue: !Sub ${FoundationStackName}-ProgressEventsStreamArn
-              - Sid: DynamoDBConnectionsQuery
-                Effect: Allow
-                Action:
-                  - dynamodb:Query
-                  - dynamodb:Scan
-                Resource:
-                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/aurora-upgrade-planner-connections
-              - Sid: WebSocketManageConnections
-                Effect: Allow
-                Action:
-                  - execute-api:ManageConnections
-                Resource:
-                  - !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/prod/POST/@connections/*
+        - !Ref WsFanoutPolicy
+
+  WsFanoutPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: aurora-upgrade-planner-ws-fanout-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DynamoDBStreamsRead
+            Effect: Allow
+            Action:
+              - dynamodb:GetRecords
+              - dynamodb:GetShardIterator
+              - dynamodb:DescribeStream
+              - dynamodb:ListStreams
+            Resource:
+              - Fn::ImportValue: !Sub ${FoundationStackName}-ProgressEventsStreamArn
+          - Sid: DynamoDBConnectionsQuery
+            Effect: Allow
+            Action:
+              - dynamodb:Query
+              - dynamodb:Scan
+            Resource:
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/aurora-upgrade-planner-connections
+          - Sid: WebSocketManageConnections
+            Effect: Allow
+            Action:
+              - execute-api:ManageConnections
+            Resource:
+              - !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/prod/POST/@connections/*
+          - Sid: VPCNetworkInterfaces
+            Effect: Allow
+            Action:
+              - ec2:CreateNetworkInterface
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DeleteNetworkInterface
+            Resource: '*'
+          - Sid: SQSDLQWrite
+            Effect: Allow
+            Action:
+              - sqs:SendMessage
+            Resource:
+              Fn::ImportValue: !Sub ${FoundationStackName}-LambdaDLQArn
 
   # --------------------------------------------------------------------------
   # Lambda — API Handler (REST)
@@ -390,6 +513,14 @@ Resources:
       Timeout: 30
       MemorySize: 256
       Role: !GetAtt ApiLambdaRole.Arn
+      ReservedConcurrentExecutions: 10
+      DeadLetterConfig:
+        TargetArn:
+          Fn::ImportValue: !Sub ${FoundationStackName}-LambdaDLQArn
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub ${FoundationStackName}-LambdaSecurityGroupId
+        SubnetIds: !Split [',', !ImportValue { "Fn::Sub": "${FoundationStackName}-SubnetIds" }]
       Environment:
         Variables:
           S3_REPORT_BUCKET:
@@ -431,6 +562,14 @@ Resources:
       Timeout: 10
       MemorySize: 128
       Role: !GetAtt WsConnectLambdaRole.Arn
+      ReservedConcurrentExecutions: 10
+      DeadLetterConfig:
+        TargetArn:
+          Fn::ImportValue: !Sub ${FoundationStackName}-LambdaDLQArn
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub ${FoundationStackName}-LambdaSecurityGroupId
+        SubnetIds: !Split [',', !ImportValue { "Fn::Sub": "${FoundationStackName}-SubnetIds" }]
       Environment:
         Variables:
           DYNAMODB_TABLE_PREFIX: aurora-upgrade-planner-
@@ -491,6 +630,14 @@ Resources:
       Timeout: 15
       MemorySize: 128
       Role: !GetAtt WsFanoutLambdaRole.Arn
+      ReservedConcurrentExecutions: 10
+      DeadLetterConfig:
+        TargetArn:
+          Fn::ImportValue: !Sub ${FoundationStackName}-LambdaDLQArn
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub ${FoundationStackName}-LambdaSecurityGroupId
+        SubnetIds: !Split [',', !ImportValue { "Fn::Sub": "${FoundationStackName}-SubnetIds" }]
       Environment:
         Variables:
           DYNAMODB_TABLE_PREFIX: aurora-upgrade-planner-
@@ -548,6 +695,12 @@ Outputs:
     Value: !Sub https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/prod
     Export:
       Name: !Sub ${AWS::StackName}-ApiGatewayURL
+
+  ApiKeyId:
+    Description: API Key ID (use 'aws apigateway get-api-key --api-key <id> --include-value' to retrieve the value)
+    Value: !Ref RestApiKey
+    Export:
+      Name: !Sub ${AWS::StackName}-ApiKeyId
 
   WebSocketURL:
     Description: WebSocket API Gateway URL

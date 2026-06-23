@@ -28,16 +28,15 @@ import type {
   BaselineQuery,
 } from '../types';
 
-// Snapshot phase removed — clone/snapshot is now a config option, not a step
-// In-place: baseline → compatibility → clone → upgrade → validation → report
-// Blue/Green: baseline → compatibility → green-env → upgrade+switchover → validation → report
+// Pipeline phases (original order: baseline first from source, then clone)
+// In-place: baseline → clone → upgrade → validation → report
+// Blue/Green: baseline → clone → upgrade+switchover → validation → report
 const PHASES: UpgradeTestPhase[] = [
   'baseline', 'clone', 'upgrade', 'validation', 'report',
 ];
 
 const PHASE_LABELS: Record<string, string> = {
   baseline:      '1. Capture Baseline',
-
   clone:         '2. Clone Source Cluster',
   upgrade:       '3. Upgrade Cloned Cluster',
   validation:    '4. Post-Upgrade Validation',
@@ -49,7 +48,6 @@ const PHASE_LABELS: Record<string, string> = {
 // Strategy-specific phase labels
 const PHASE_LABELS_BG: Record<string, string> = {
   baseline:      '1. Capture Baseline',
-
   clone:         '2. Green Environment',
   upgrade:       '3. Upgrade + Switchover',
   validation:    '4. Post-Upgrade Validation',
@@ -60,9 +58,8 @@ const PHASE_LABELS_BG: Record<string, string> = {
 
 const PHASE_DESCRIPTIONS: Record<string, string> = {
   baseline:      'Collecting top queries from performance_schema (MySQL) or pg_stat_statements (PostgreSQL) and parameter group settings',
-
   clone:         'Creating a point-in-time clone of your source cluster — your production database is never modified',
-  upgrade:       'Upgrading the cloned cluster to the target version. Replaying baseline queries to measure outage and failures',
+  upgrade:       'Upgrading the cloned cluster to the target version',
   validation:    'Replaying baseline queries post-upgrade to detect failures and latency regressions',
   report:        'Compiling final report with action items and optimization suggestions',
 };
@@ -117,8 +114,9 @@ function BaselineQueriesPanel({ queries, querySource }: {
   if (!queries.length) {
     return (
       <Alert type="info">
-        No query baseline collected. Configure <code>DB_SECRET_ARN</code> to enable
-        live collection from performance_schema / pg_stat_statements.
+        No query baseline collected. Set <code>DB_SECRET_ARN</code> on the baseline Lambda
+        to enable live collection from performance_schema / pg_stat_statements and
+        post-upgrade query replay.
       </Alert>
     );
   }
@@ -689,7 +687,7 @@ export default function UpgradeTest() {
                         <QueryReplayPanel replay={duringReplay} label="During Upgrade" />
                       ) : (
                         <Alert type="info">
-                          No upgrade-window replay data. Configure <code>DB_SECRET_ARN</code> to enable.
+                          No upgrade-window replay data available for this run.
                         </Alert>
                       )}
                     </Box>
@@ -704,7 +702,7 @@ export default function UpgradeTest() {
                         <QueryReplayPanel replay={postReplay} label="Post-Upgrade" />
                       ) : (
                         <Alert type="info">
-                          No post-upgrade replay data. Configure <code>DB_SECRET_ARN</code> to enable.
+                          No post-upgrade replay data available for this run.
                         </Alert>
                       )}
                     </Box>

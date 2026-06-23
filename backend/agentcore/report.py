@@ -1,3 +1,6 @@
+# This agent is accessed through Amazon Bedrock AgentCore Runtime.
+# Model: Claude Sonnet 4 via Amazon Bedrock (us.anthropic.claude-sonnet-4-20250514-v1:0)
+
 """Report Agent — AgentCore agent for generating upgrade readiness verdicts.
 
 Takes all findings (compatibility, validation, code analysis, cluster analysis)
