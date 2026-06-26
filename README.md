@@ -72,6 +72,14 @@ Everything else is auto-detected (account ID, region, subnets, AgentCore endpoin
 
 The installer deploys 2 CloudFormation stacks, packages Lambda code, deploys 3 AgentCore agents, builds the React frontend, and syncs to S3/CloudFront. No Docker required.
 
+### Split-Team Deployment (Pre-Created IAM Roles)
+
+If your security team manages IAM separately:
+
+1. Security team deploys `infra/00-iam-roles.yaml` (creates 3 IAM roles)
+2. Developer copies `conf/roles.conf.example` to `conf/roles.conf` and fills in the role ARNs
+3. Developer runs `./install.sh` — it detects `roles.conf` and skips IAM creation (no `CAPABILITY_NAMED_IAM` needed)
+
 ## Project Structure
 
 ```
