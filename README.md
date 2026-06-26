@@ -119,7 +119,7 @@ infra/
 
 ## Cost
 
-~$150-200/year for 100 clusters upgraded annually. ~$1/month at rest (no always-on compute). Per-run cost: ~$1.50-2.00 per cluster upgrade cycle.
+~$150-200/year for 100 clusters upgraded annually based on the current model selection and costs. It could change with different models.
 
 ## Security Review
 
