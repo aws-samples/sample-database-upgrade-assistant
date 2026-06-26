@@ -129,13 +129,46 @@ deploy_stack() {
   aws cloudformation deploy $AWS_PROFILE_OPT "$@" --tags "$TAG_KEY"="$TAG_VALUE" --region "$REGION" --no-fail-on-empty-changeset
 }
 
+# Check for pre-created IAM roles (split-team deployment)
+ROLES_CONF="$(dirname "$0")/conf/roles.conf"
+USE_PRECREATED_ROLES=false
+CFN_CAPABILITIES="CAPABILITY_NAMED_IAM"
+ROLE_PARAMS=""
+
+if [ -f "$ROLES_CONF" ]; then
+  echo ""
+  echo ">>> Found conf/roles.conf — using pre-created IAM roles (split-team mode)"
+  LAMBDA_ROLE_ARN=$(grep "^LAMBDA_ROLE=" "$ROLES_CONF" | cut -d= -f2)
+  API_ROLE_ARN=$(grep "^API_ROLE=" "$ROLES_CONF" | cut -d= -f2)
+  SFN_ROLE_ARN=$(grep "^SFN_ROLE=" "$ROLES_CONF" | cut -d= -f2)
+  if [ -z "$LAMBDA_ROLE_ARN" ] || [ -z "$API_ROLE_ARN" ] || [ -z "$SFN_ROLE_ARN" ]; then
+    echo "ERROR: conf/roles.conf must contain LAMBDA_ROLE, API_ROLE, and SFN_ROLE"
+    echo "See conf/roles.conf.example for format."
+    exit 1
+  fi
+  USE_PRECREATED_ROLES=true
+  CFN_CAPABILITIES="CAPABILITY_IAM"
+  echo "  Lambda Role: $LAMBDA_ROLE_ARN"
+  echo "  API Role:    $API_ROLE_ARN"
+  echo "  SFN Role:    $SFN_ROLE_ARN"
+fi
+
 echo ""
 echo ">>> Step 1/2: Foundation (DynamoDB, S3, CloudFront, Lambda, SQS)"
-deploy_stack aurora-upgrade-planner-foundation \
-  --template-file infra/01-foundation.yaml \
-  --stack-name aurora-upgrade-planner-foundation \
-  --parameter-overrides ExternalId="$EXTERNAL_ID" VpcId="$VPC_ID" SubnetIds="$SUBNETS" \
-  --capabilities CAPABILITY_NAMED_IAM
+if [ "$USE_PRECREATED_ROLES" = true ]; then
+  deploy_stack aurora-upgrade-planner-foundation \
+    --template-file infra/01-foundation.yaml \
+    --stack-name aurora-upgrade-planner-foundation \
+    --parameter-overrides ExternalId="$EXTERNAL_ID" VpcId="$VPC_ID" SubnetIds="$SUBNETS" \
+      LambdaRoleArn="$LAMBDA_ROLE_ARN" SfnRoleArn="$SFN_ROLE_ARN" \
+    --capabilities $CFN_CAPABILITIES
+else
+  deploy_stack aurora-upgrade-planner-foundation \
+    --template-file infra/01-foundation.yaml \
+    --stack-name aurora-upgrade-planner-foundation \
+    --parameter-overrides ExternalId="$EXTERNAL_ID" VpcId="$VPC_ID" SubnetIds="$SUBNETS" \
+    --capabilities $CFN_CAPABILITIES
+fi
 
 REPORT_BUCKET=$(get_output aurora-upgrade-planner-foundation ReportBucketName)
 FRONTEND_BUCKET=$(get_output aurora-upgrade-planner-foundation FrontendBucketName)
@@ -146,11 +179,20 @@ echo "  CloudFront: $CF_URL"
 
 echo ""
 echo ">>> Step 2/2: API Gateway"
-deploy_stack aurora-upgrade-planner-frontend-api \
-  --template-file infra/02-frontend-api-stub.yaml \
-  --stack-name aurora-upgrade-planner-frontend-api \
-  --parameter-overrides FoundationStackName=aurora-upgrade-planner-foundation \
-  --capabilities CAPABILITY_NAMED_IAM
+if [ "$USE_PRECREATED_ROLES" = true ]; then
+  deploy_stack aurora-upgrade-planner-frontend-api \
+    --template-file infra/02-frontend-api-stub.yaml \
+    --stack-name aurora-upgrade-planner-frontend-api \
+    --parameter-overrides FoundationStackName=aurora-upgrade-planner-foundation \
+      ApiLambdaRoleArn="$API_ROLE_ARN" \
+    --capabilities $CFN_CAPABILITIES
+else
+  deploy_stack aurora-upgrade-planner-frontend-api \
+    --template-file infra/02-frontend-api-stub.yaml \
+    --stack-name aurora-upgrade-planner-frontend-api \
+    --parameter-overrides FoundationStackName=aurora-upgrade-planner-foundation \
+    --capabilities $CFN_CAPABILITIES
+fi
 
 API_URL=$(get_output aurora-upgrade-planner-frontend-api ApiGatewayURL)
 WS_URL=$(get_output aurora-upgrade-planner-frontend-api WebSocketURL)

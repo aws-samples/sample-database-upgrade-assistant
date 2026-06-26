@@ -1,0 +1,329 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  RDS Upgrade Assistant — IAM Roles (Standalone).
+  Deploy this template FIRST if your security team manages IAM separately.
+  After deployment, provide the 3 role ARNs in conf/roles.conf before running install.sh.
+
+# ============================================================================
+Parameters:
+  ExternalId:
+    Type: String
+    NoEcho: true
+    Description: Shared secret for cross-account STS AssumeRole (must match the tool deployment)
+
+# ============================================================================
+Resources:
+
+  # --------------------------------------------------------------------------
+  # Role 1: Pipeline Lambda Execution Role
+  # Used by: baseline, clone, poll-status, upgrade, validation, cleanup,
+  #          deprecation, code-analysis Lambda functions
+  # --------------------------------------------------------------------------
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aurora-upgrade-planner-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref LambdaExecutionPolicy
+
+  LambdaExecutionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: aurora-upgrade-planner-lambda-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: CloudWatchLogs
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/aurora-upgrade-planner-*
+          - Sid: S3ReadWrite
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:ListBucket
+              - s3:HeadObject
+            Resource:
+              - !Sub arn:aws:s3:::aurora-upgrade-planner-reports-${AWS::AccountId}-${AWS::Region}
+              - !Sub arn:aws:s3:::aurora-upgrade-planner-reports-${AWS::AccountId}-${AWS::Region}/*
+          - Sid: DynamoDBCRUD
+            Effect: Allow
+            Action:
+              - dynamodb:PutItem
+              - dynamodb:GetItem
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteItem
+              - dynamodb:Query
+              - dynamodb:Scan
+            Resource:
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/aurora-upgrade-planner-*
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/aurora-upgrade-planner-*/index/*
+          - Sid: RDSReadOnly
+            Effect: Allow
+            Action:
+              - rds:DescribeDBEngineVersions
+              - rds:DescribeDBClusters
+              - rds:DescribeDBInstances
+              - rds:DescribeDBClusterParameters
+              - rds:DescribeDBClusterSnapshots
+            Resource: '*'
+          - Sid: RDSCloneAndUpgrade
+            Effect: Allow
+            Action:
+              - rds:RestoreDBClusterToPointInTime
+              - rds:RestoreDBClusterFromSnapshot
+              - rds:CopyDBClusterSnapshot
+            Resource:
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:subgrp:*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster-snapshot:*
+          - Sid: RDSWriteOnClones
+            Effect: Allow
+            Action:
+              - rds:CreateDBInstance
+              - rds:ModifyDBCluster
+              - rds:DeleteDBCluster
+              - rds:DeleteDBInstance
+              - rds:DeleteDBClusterSnapshot
+              - rds:AddTagsToResource
+            Resource:
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:aurora-planner-test-*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:aurora-planner-test-*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster-snapshot:aurora-planner-*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster-pg:aurora-planner-*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster-pg:default.*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:pg:aurora-planner-*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:pg:default.*
+          - Sid: PerformanceInsights
+            Effect: Allow
+            Action:
+              - pi:GetResourceMetrics
+            Resource: '*'
+          - Sid: LambdaInvoke
+            Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:aurora-upgrade-planner-*
+          - Sid: StepFunctionsStart
+            Effect: Allow
+            Action:
+              - states:StartExecution
+            Resource: !Sub arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:aurora-upgrade-planner-*
+          - Sid: STSAssumeRole
+            Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Resource: !Sub arn:aws:iam::*:role/aurora-upgrade-planner-cross-account-role
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId
+          - Sid: STSIdentity
+            Effect: Allow
+            Action:
+              - sts:GetCallerIdentity
+            Resource: '*'
+          - Sid: BedrockListModels
+            Effect: Allow
+            Action:
+              - bedrock:ListFoundationModels
+            Resource: '*'
+          - Sid: AgentCoreInvoke
+            Effect: Allow
+            Action:
+              - bedrock-agentcore:InvokeAgentRuntime
+            Resource:
+              - !Sub arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:runtime/*
+          - Sid: SecretsManager
+            Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+              - secretsmanager:PutSecretValue
+              - secretsmanager:CreateSecret
+              - secretsmanager:DeleteSecret
+              - secretsmanager:DescribeSecret
+            Resource:
+              - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:aurora-upgrade-planner/*
+          - Sid: SQSDLQWrite
+            Effect: Allow
+            Action:
+              - sqs:SendMessage
+            Resource: !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:aurora-upgrade-planner-lambda-dlq
+          - Sid: VPCNetworkInterfaces
+            # Resource: '*' required — Lambda VPC ENI ARNs are assigned at runtime
+            Effect: Allow
+            Action:
+              - ec2:CreateNetworkInterface
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DeleteNetworkInterface
+            Resource: '*'
+
+  # --------------------------------------------------------------------------
+  # Role 2: API Lambda Execution Role
+  # Used by: aurora-upgrade-planner-api Lambda function
+  # --------------------------------------------------------------------------
+  ApiLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aurora-upgrade-planner-api-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref ApiLambdaPolicy
+
+  ApiLambdaPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: aurora-upgrade-planner-api-lambda-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: CloudWatchLogs
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/aurora-upgrade-planner-api*
+          - Sid: DynamoDBCRUD
+            Effect: Allow
+            Action:
+              - dynamodb:PutItem
+              - dynamodb:GetItem
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteItem
+              - dynamodb:Query
+              - dynamodb:Scan
+            Resource:
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/aurora-upgrade-planner-*
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/aurora-upgrade-planner-*/index/*
+          - Sid: S3ReadWrite
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:ListBucket
+            Resource:
+              - !Sub arn:aws:s3:::aurora-upgrade-planner-reports-${AWS::AccountId}-${AWS::Region}
+              - !Sub arn:aws:s3:::aurora-upgrade-planner-reports-${AWS::AccountId}-${AWS::Region}/*
+          - Sid: LambdaInvoke
+            Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource:
+              - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:aurora-upgrade-planner-*
+          - Sid: StepFunctionsStart
+            Effect: Allow
+            Action:
+              - states:StartExecution
+            Resource:
+              - !Sub arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:aurora-upgrade-planner-*
+          - Sid: RDSDescribe
+            Effect: Allow
+            Action:
+              - rds:DescribeDBClusters
+              - rds:DescribeDBInstances
+              - rds:DescribeDBEngineVersions
+              - rds:DescribeDBClusterParameters
+            Resource: '*'
+          - Sid: STSAssumeRole
+            Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Resource:
+              - !Sub arn:aws:iam::*:role/aurora-upgrade-planner-cross-account-role
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId
+          - Sid: STSIdentity
+            Effect: Allow
+            Action:
+              - sts:GetCallerIdentity
+            Resource: '*'
+          - Sid: IAMPassRole
+            Effect: Allow
+            Action:
+              - iam:PassRole
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/aurora-upgrade-planner-*
+          - Sid: SecretsManager
+            Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+              - secretsmanager:PutSecretValue
+              - secretsmanager:CreateSecret
+              - secretsmanager:DeleteSecret
+              - secretsmanager:DescribeSecret
+            Resource:
+              - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:aurora-upgrade-planner/*
+          - Sid: VPCNetworkInterfaces
+            Effect: Allow
+            Action:
+              - ec2:CreateNetworkInterface
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DeleteNetworkInterface
+            Resource: '*'
+
+  # --------------------------------------------------------------------------
+  # Role 3: Step Functions Execution Role
+  # Used by: aurora-upgrade-planner-upgrade-test state machine
+  # --------------------------------------------------------------------------
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aurora-upgrade-planner-sfn-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref StepFunctionsPolicy
+
+  StepFunctionsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: aurora-upgrade-planner-sfn-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: lambda:InvokeFunction
+            Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:aurora-upgrade-planner-*
+
+# ============================================================================
+Outputs:
+  LambdaExecutionRoleArn:
+    Description: ARN of the Pipeline Lambda execution role — use as LAMBDA_ROLE in conf/roles.conf
+    Value: !GetAtt LambdaExecutionRole.Arn
+    Export:
+      Name: aurora-upgrade-planner-lambda-role-arn
+
+  ApiLambdaRoleArn:
+    Description: ARN of the API Lambda execution role — use as API_ROLE in conf/roles.conf
+    Value: !GetAtt ApiLambdaRole.Arn
+    Export:
+      Name: aurora-upgrade-planner-api-role-arn
+
+  StepFunctionsRoleArn:
+    Description: ARN of the Step Functions execution role — use as SFN_ROLE in conf/roles.conf
+    Value: !GetAtt StepFunctionsRole.Arn
+    Export:
+      Name: aurora-upgrade-planner-sfn-role-arn

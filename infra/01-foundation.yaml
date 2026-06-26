@@ -21,6 +21,20 @@ Parameters:
     Type: CommaDelimitedList
     Description: Comma-separated list of private subnet IDs (must have NAT Gateway route for outbound internet)
 
+  LambdaRoleArn:
+    Type: String
+    Default: ''
+    Description: (Optional) Pre-created Lambda execution role ARN. If empty, role is created inline.
+
+  SfnRoleArn:
+    Type: String
+    Default: ''
+    Description: (Optional) Pre-created Step Functions execution role ARN. If empty, role is created inline.
+
+Conditions:
+  CreateLambdaRole: !Equals [!Ref LambdaRoleArn, '']
+  CreateSfnRole: !Equals [!Ref SfnRoleArn, '']
+
 # ============================================================================
 # Resources
 # ============================================================================
@@ -451,6 +465,7 @@ Resources:
   # --------------------------------------------------------------------------
   LambdaExecutionRole:
     Type: AWS::IAM::Role
+    Condition: CreateLambdaRole
     Properties:
       RoleName: aurora-upgrade-planner-lambda-role
       AssumeRolePolicyDocument:
@@ -465,6 +480,7 @@ Resources:
 
   LambdaExecutionPolicy:
     Type: AWS::IAM::ManagedPolicy
+    Condition: CreateLambdaRole
     Properties:
       ManagedPolicyName: aurora-upgrade-planner-lambda-policy
       PolicyDocument:
@@ -616,6 +632,7 @@ Resources:
   # --------------------------------------------------------------------------
   StepFunctionsRole:
     Type: AWS::IAM::Role
+    Condition: CreateSfnRole
     Properties:
       RoleName: aurora-upgrade-planner-sfn-role
       AssumeRolePolicyDocument:
@@ -630,6 +647,7 @@ Resources:
 
   StepFunctionsPolicy:
     Type: AWS::IAM::ManagedPolicy
+    Condition: CreateSfnRole
     Properties:
       ManagedPolicyName: aurora-upgrade-planner-sfn-policy
       PolicyDocument:
@@ -644,7 +662,7 @@ Resources:
     Properties:
       StateMachineName: aurora-upgrade-planner-upgrade-test
       StateMachineType: STANDARD
-      RoleArn: !GetAtt StepFunctionsRole.Arn
+      RoleArn: !If [CreateSfnRole, !GetAtt StepFunctionsRole.Arn, !Ref SfnRoleArn]
       DefinitionString: !Sub |
         {
           "Comment": "Aurora Upgrade Test Pipeline — Baseline → Clone → WaitForClone → Upgrade → WaitForUpgrade → Validation → Cleanup",
@@ -907,7 +925,7 @@ Resources:
       FunctionName: aurora-upgrade-planner-deprecation
       Runtime: python3.12
       Handler: lambdas/deprecation.handler
-      Role: !GetAtt LambdaExecutionRole.Arn
+      Role: !If [CreateLambdaRole, !GetAtt LambdaExecutionRole.Arn, !Ref LambdaRoleArn]
       Timeout: 900
       MemorySize: 512
       ReservedConcurrentExecutions: 5
@@ -931,7 +949,7 @@ Resources:
       FunctionName: aurora-upgrade-planner-code-analysis
       Runtime: python3.12
       Handler: lambdas/code_analysis.handler
-      Role: !GetAtt LambdaExecutionRole.Arn
+      Role: !If [CreateLambdaRole, !GetAtt LambdaExecutionRole.Arn, !Ref LambdaRoleArn]
       Timeout: 900
       MemorySize: 1024
       ReservedConcurrentExecutions: 5
@@ -955,7 +973,7 @@ Resources:
       FunctionName: aurora-upgrade-planner-baseline
       Runtime: python3.12
       Handler: lambdas/baseline.handler
-      Role: !GetAtt LambdaExecutionRole.Arn
+      Role: !If [CreateLambdaRole, !GetAtt LambdaExecutionRole.Arn, !Ref LambdaRoleArn]
       Timeout: 300
       MemorySize: 256
       ReservedConcurrentExecutions: 5
@@ -978,7 +996,7 @@ Resources:
       FunctionName: aurora-upgrade-planner-clone
       Runtime: python3.12
       Handler: lambdas/clone.handler
-      Role: !GetAtt LambdaExecutionRole.Arn
+      Role: !If [CreateLambdaRole, !GetAtt LambdaExecutionRole.Arn, !Ref LambdaRoleArn]
       Timeout: 300
       MemorySize: 256
       ReservedConcurrentExecutions: 5
@@ -1001,7 +1019,7 @@ Resources:
       FunctionName: aurora-upgrade-planner-upgrade
       Runtime: python3.12
       Handler: lambdas/upgrade.handler
-      Role: !GetAtt LambdaExecutionRole.Arn
+      Role: !If [CreateLambdaRole, !GetAtt LambdaExecutionRole.Arn, !Ref LambdaRoleArn]
       Timeout: 300
       MemorySize: 256
       ReservedConcurrentExecutions: 5
@@ -1024,7 +1042,7 @@ Resources:
       FunctionName: aurora-upgrade-planner-validation
       Runtime: python3.12
       Handler: lambdas/validation.handler
-      Role: !GetAtt LambdaExecutionRole.Arn
+      Role: !If [CreateLambdaRole, !GetAtt LambdaExecutionRole.Arn, !Ref LambdaRoleArn]
       Timeout: 900
       MemorySize: 512
       ReservedConcurrentExecutions: 5
@@ -1048,7 +1066,7 @@ Resources:
       FunctionName: aurora-upgrade-planner-cleanup
       Runtime: python3.12
       Handler: lambdas/cleanup.handler
-      Role: !GetAtt LambdaExecutionRole.Arn
+      Role: !If [CreateLambdaRole, !GetAtt LambdaExecutionRole.Arn, !Ref LambdaRoleArn]
       Timeout: 600
       MemorySize: 256
       ReservedConcurrentExecutions: 5
@@ -1071,7 +1089,7 @@ Resources:
       FunctionName: aurora-upgrade-planner-poll-status
       Runtime: python3.12
       Handler: lambdas/poll_status.handler
-      Role: !GetAtt LambdaExecutionRole.Arn
+      Role: !If [CreateLambdaRole, !GetAtt LambdaExecutionRole.Arn, !Ref LambdaRoleArn]
       Timeout: 30
       MemorySize: 128
       ReservedConcurrentExecutions: 5
@@ -1118,7 +1136,7 @@ Outputs:
     Export:
       Name: !Sub ${AWS::StackName}-CloudFrontDistributionId
   LambdaExecutionRoleArn:
-    Value: !GetAtt LambdaExecutionRole.Arn
+    Value: !If [CreateLambdaRole, !GetAtt LambdaExecutionRole.Arn, !Ref LambdaRoleArn]
     Export:
       Name: !Sub ${AWS::StackName}-LambdaExecutionRoleArn
   UpgradeTestStateMachineArn:

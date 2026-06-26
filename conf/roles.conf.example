@@ -1,0 +1,14 @@
+# RDS Upgrade Assistant — Pre-created IAM Role ARNs
+#
+# If your security team deploys IAM roles separately using infra/00-iam-roles.yaml,
+# copy this file to conf/roles.conf and fill in the ARNs from the stack outputs.
+# install.sh will use these instead of creating roles.
+#
+# Usage:
+#   cp conf/roles.conf.example conf/roles.conf
+#   # Fill in ARNs from CloudFormation outputs of 00-iam-roles.yaml
+#   ./install.sh
+
+# LAMBDA_ROLE=arn:aws:iam::ACCOUNT_ID:role/aurora-upgrade-planner-lambda-role
+# API_ROLE=arn:aws:iam::ACCOUNT_ID:role/aurora-upgrade-planner-api-lambda-role
+# SFN_ROLE=arn:aws:iam::ACCOUNT_ID:role/aurora-upgrade-planner-sfn-role
