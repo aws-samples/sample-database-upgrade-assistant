@@ -16,6 +16,7 @@ conf/install.conf
 **/.cache/
 **/.cli/
 **/.venv/
+**/aws-targets.json
 
 # Docs - only architecture-current.png is published
 docs/*.md
