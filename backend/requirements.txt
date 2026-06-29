@@ -1,0 +1,8 @@
+# Core dependencies
+boto3==1.35.0
+mcp==1.6.0
+requests==2.32.0
+
+# Database drivers for baseline query collection
+pymysql==1.1.2  # CVE-2024-36039: SQL injection via escape_dict fixed in 1.1.1+
+psycopg2-binary==2.9.9

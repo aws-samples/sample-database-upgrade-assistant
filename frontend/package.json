@@ -1,0 +1,32 @@
+{
+  "name": "rds-upgrade-assistant",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "test": "vitest --run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@cloudscape-design/components": "3.0.843",
+    "@cloudscape-design/global-styles": "1.0.35",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-router-dom": "6.23.1"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "@vitejs/plugin-react": "4.3.4",
+    "fast-check": "3.23.2",
+    "typescript": "5.5.4",
+    "vite": "5.4.14",
+    "vitest": "2.1.8",
+    "@testing-library/react": "16.1.0",
+    "@testing-library/jest-dom": "6.4.8",
+    "jsdom": "24.1.3"
+  }
+}

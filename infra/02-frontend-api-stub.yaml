@@ -1,0 +1,721 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  RDS Upgrade Assistant Frontend API Stub.
+  API Gateway REST + WebSocket APIs, Lambda handlers (mock stubs),
+  IAM roles, and deployments.
+
+# ============================================================================
+# Parameters
+# ============================================================================
+Parameters:
+  FoundationStackName:
+    Type: String
+    Default: aurora-upgrade-planner-foundation
+    Description: Name of the foundation stack to import outputs from
+
+# ============================================================================
+# Resources
+# ============================================================================
+Resources:
+
+  # --------------------------------------------------------------------------
+  # REST API Gateway
+  # --------------------------------------------------------------------------
+  RestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: aurora-upgrade-planner-api
+      Description: RDS Upgrade Assistant REST API
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  RestApiRootMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !GetAtt RestApi.RootResourceId
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiLambda.Arn}/invocations
+
+  RestApiRootOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !GetAtt RestApi.RootResourceId
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,x-api-key'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  RestApiProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: '{proxy+}'
+
+  RestApiProxyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref RestApiProxyResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiLambda.Arn}/invocations
+
+  RestApiProxyOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref RestApiProxyResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,x-api-key'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  RestApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - RestApiRootMethod
+      - RestApiRootOptions
+      - RestApiProxyMethod
+      - RestApiProxyOptions
+    Properties:
+      RestApiId: !Ref RestApi
+
+  RestApiStage:
+    Type: AWS::ApiGateway::Stage
+    DependsOn: ApiGatewayAccount
+    Properties:
+      RestApiId: !Ref RestApi
+      DeploymentId: !Ref RestApiDeployment
+      StageName: prod
+      AccessLogSetting:
+        DestinationArn: !GetAtt RestApiAccessLogGroup.Arn
+        Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","resourcePath":"$context.resourcePath","status":"$context.status","responseLength":"$context.responseLength"}'
+
+  RestApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/apigateway/aurora-upgrade-planner-api-access
+      RetentionInDays: 30
+
+  ApiGatewayCloudWatchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aurora-upgrade-planner-apigw-cloudwatch-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    DependsOn: RestApi
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiGatewayCloudWatchRole.Arn
+
+  # --------------------------------------------------------------------------
+  # API Key + Usage Plan (REST API authentication)
+  # --------------------------------------------------------------------------
+  RestApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    DependsOn: RestApiStage
+    Properties:
+      Name: aurora-upgrade-planner-api-key
+      Enabled: true
+      StageKeys:
+        - RestApiId: !Ref RestApi
+          StageName: prod
+
+  RestApiUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    DependsOn: RestApiStage
+    Properties:
+      UsagePlanName: aurora-upgrade-planner-usage-plan
+      ApiStages:
+        - ApiId: !Ref RestApi
+          Stage: prod
+      Throttle:
+        BurstLimit: 50
+        RateLimit: 20
+
+  RestApiUsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref RestApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref RestApiUsagePlan
+
+  # --------------------------------------------------------------------------
+  # WebSocket API Gateway
+  # --------------------------------------------------------------------------
+  WebSocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: aurora-upgrade-planner-ws
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: $request.body.action
+
+  WsConnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WsConnectLambda.Arn}/invocations
+
+  WsConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $connect
+      AuthorizationType: NONE
+      Target: !Sub integrations/${WsConnectIntegration}
+
+  WsDisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $disconnect
+      AuthorizationType: NONE
+      Target: !Sub integrations/${WsConnectIntegration}
+
+  WsDefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $default
+      AuthorizationType: NONE
+      Target: !Sub integrations/${WsConnectIntegration}
+
+  WsSubscribeRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: subscribe
+      AuthorizationType: NONE
+      Target: !Sub integrations/${WsConnectIntegration}
+
+  WsDeployment:
+    Type: AWS::ApiGatewayV2::Deployment
+    DependsOn:
+      - WsConnectRoute
+      - WsDisconnectRoute
+      - WsDefaultRoute
+      - WsSubscribeRoute
+    Properties:
+      ApiId: !Ref WebSocketApi
+
+  WsStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WebSocketApi
+      StageName: prod
+      DeploymentId: !Ref WsDeployment
+
+  # --------------------------------------------------------------------------
+  # IAM Role — API Lambda
+  # --------------------------------------------------------------------------
+  ApiLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aurora-upgrade-planner-api-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Ref ApiLambdaPolicy
+
+  ApiLambdaPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: aurora-upgrade-planner-api-lambda-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DynamoDBCRUD
+            Effect: Allow
+            Action:
+              - dynamodb:PutItem
+              - dynamodb:GetItem
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteItem
+              - dynamodb:Query
+              - dynamodb:Scan
+            Resource:
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/aurora-upgrade-planner-*
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/aurora-upgrade-planner-*/index/*
+          - Sid: KMSDecryptForDynamoDB
+            Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:GenerateDataKey
+            Resource:
+              Fn::ImportValue: !Sub ${FoundationStackName}-DynamoDBKMSKeyArn
+          - Sid: S3ReadWrite
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:ListBucket
+            Resource:
+              - !Sub
+                - arn:aws:s3:::${BucketName}
+                - BucketName:
+                    Fn::ImportValue: !Sub ${FoundationStackName}-ReportBucketName
+              - !Sub
+                - arn:aws:s3:::${BucketName}/*
+                - BucketName:
+                    Fn::ImportValue: !Sub ${FoundationStackName}-ReportBucketName
+          - Sid: LambdaInvoke
+            Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource:
+              - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:aurora-upgrade-planner-*
+          - Sid: StepFunctionsStart
+            Effect: Allow
+            Action:
+              - states:StartExecution
+            Resource:
+              - !Sub arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:aurora-upgrade-planner-*
+          - Sid: RDSDescribe
+            Effect: Allow
+            Action:
+              - rds:DescribeDBClusters
+              - rds:DescribeDBInstances
+              - rds:DescribeDBClusterSnapshots
+              - rds:DescribeEngineDefaultClusterParameters
+            Resource: '*'
+          - Sid: RDSDeleteClones
+            Effect: Allow
+            Action:
+              - rds:DeleteDBClusterSnapshot
+              - rds:DeleteDBCluster
+              - rds:DeleteDBInstance
+            Resource:
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:aurora-planner-test-*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:aurora-planner-test-*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster-snapshot:aurora-planner-*
+          - Sid: STSAssumeRole
+            Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Resource:
+              - !Sub arn:aws:iam::*:role/aurora-upgrade-planner-cross-account-role
+          - Sid: STSIdentity
+            Effect: Allow
+            Action:
+              - sts:GetCallerIdentity
+            Resource: '*'
+          - Sid: IAMPassRole
+            Effect: Allow
+            Action:
+              - iam:PassRole
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/aurora-upgrade-planner-*
+          - Sid: SecretsManagerGitHub
+            Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+              - secretsmanager:PutSecretValue
+              - secretsmanager:CreateSecret
+              - secretsmanager:DeleteSecret
+              - secretsmanager:DescribeSecret
+            Resource:
+              - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:aurora-upgrade-planner/github-token*
+          - Sid: VPCNetworkInterfaces
+            Effect: Allow
+            Action:
+              - ec2:CreateNetworkInterface
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DeleteNetworkInterface
+            Resource: '*'
+          - Sid: SQSDLQWrite
+            Effect: Allow
+            Action:
+              - sqs:SendMessage
+            Resource:
+              Fn::ImportValue: !Sub ${FoundationStackName}-LambdaDLQArn
+
+  # --------------------------------------------------------------------------
+  # IAM Role — WebSocket Connect Lambda
+  # --------------------------------------------------------------------------
+  WsConnectLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aurora-upgrade-planner-ws-connect-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Ref WsConnectPolicy
+
+  WsConnectPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: aurora-upgrade-planner-ws-connect-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DynamoDBConnections
+            Effect: Allow
+            Action:
+              - dynamodb:PutItem
+              - dynamodb:DeleteItem
+              - dynamodb:GetItem
+              - dynamodb:UpdateItem
+            Resource:
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/aurora-upgrade-planner-connections
+          - Sid: VPCNetworkInterfaces
+            Effect: Allow
+            Action:
+              - ec2:CreateNetworkInterface
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DeleteNetworkInterface
+            Resource: '*'
+          - Sid: SQSDLQWrite
+            Effect: Allow
+            Action:
+              - sqs:SendMessage
+            Resource:
+              Fn::ImportValue: !Sub ${FoundationStackName}-LambdaDLQArn
+
+  # --------------------------------------------------------------------------
+  # IAM Role — WebSocket Fan-out Lambda
+  # --------------------------------------------------------------------------
+  WsFanoutLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aurora-upgrade-planner-ws-fanout-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Ref WsFanoutPolicy
+
+  WsFanoutPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: aurora-upgrade-planner-ws-fanout-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DynamoDBStreamsRead
+            Effect: Allow
+            Action:
+              - dynamodb:GetRecords
+              - dynamodb:GetShardIterator
+              - dynamodb:DescribeStream
+              - dynamodb:ListStreams
+            Resource:
+              - Fn::ImportValue: !Sub ${FoundationStackName}-ProgressEventsStreamArn
+          - Sid: DynamoDBConnectionsQuery
+            Effect: Allow
+            Action:
+              - dynamodb:Query
+              - dynamodb:Scan
+            Resource:
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/aurora-upgrade-planner-connections
+          - Sid: WebSocketManageConnections
+            Effect: Allow
+            Action:
+              - execute-api:ManageConnections
+            Resource:
+              - !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/prod/POST/@connections/*
+          - Sid: VPCNetworkInterfaces
+            Effect: Allow
+            Action:
+              - ec2:CreateNetworkInterface
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DeleteNetworkInterface
+            Resource: '*'
+          - Sid: SQSDLQWrite
+            Effect: Allow
+            Action:
+              - sqs:SendMessage
+            Resource:
+              Fn::ImportValue: !Sub ${FoundationStackName}-LambdaDLQArn
+
+  # --------------------------------------------------------------------------
+  # Lambda — API Handler (REST)
+  # --------------------------------------------------------------------------
+  # NOTE: Lambda code is deployed via `aws lambda update-function-code` (zip file)
+  # because the handler is too large for inline ZipFile. The ZipFile below is a
+  # placeholder that returns 503 until the real code is deployed.
+  ApiLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: aurora-upgrade-planner-api
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      Handler: handler.handler
+      Timeout: 30
+      MemorySize: 256
+      Role: !GetAtt ApiLambdaRole.Arn
+      ReservedConcurrentExecutions: 10
+      DeadLetterConfig:
+        TargetArn:
+          Fn::ImportValue: !Sub ${FoundationStackName}-LambdaDLQArn
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub ${FoundationStackName}-LambdaSecurityGroupId
+        SubnetIds: !Split [',', !ImportValue { "Fn::Sub": "${FoundationStackName}-SubnetIds" }]
+      Environment:
+        Variables:
+          S3_REPORT_BUCKET:
+            Fn::ImportValue: !Sub ${FoundationStackName}-ReportBucketName
+          DYNAMODB_TABLE_PREFIX: aurora-upgrade-planner-
+          UPGRADE_TEST_STATE_MACHINE_ARN:
+            Fn::ImportValue: !Sub ${FoundationStackName}-UpgradeTestStateMachineArn
+          DEPRECATION_LAMBDA_NAME: aurora-upgrade-planner-deprecation
+          CODE_ANALYSIS_LAMBDA_NAME: aurora-upgrade-planner-code-analysis
+          WEBSOCKET_URL: !Sub wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod
+          BEDROCK_MODEL_ID: us.anthropic.claude-haiku-4-5-20251001-v1:0
+          ALLOWED_ORIGINS:
+            Fn::ImportValue: !Sub ${FoundationStackName}-CloudFrontURL
+      Code:
+        ZipFile: |
+          import json
+          def handler(event, context):
+              return {"statusCode":503,"headers":{"Content-Type":"application/json","Access-Control-Allow-Origin":"*"},"body":json.dumps({"error":"Service Unavailable","message":"Deploy handler code via: aws lambda update-function-code"})}
+
+  ApiLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ApiLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*
+
+  # --------------------------------------------------------------------------
+  # Lambda — WebSocket Connect/Disconnect
+  # --------------------------------------------------------------------------
+  WsConnectLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: aurora-upgrade-planner-ws-connect
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      Handler: index.handler
+      Timeout: 10
+      MemorySize: 128
+      Role: !GetAtt WsConnectLambdaRole.Arn
+      ReservedConcurrentExecutions: 10
+      DeadLetterConfig:
+        TargetArn:
+          Fn::ImportValue: !Sub ${FoundationStackName}-LambdaDLQArn
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub ${FoundationStackName}-LambdaSecurityGroupId
+        SubnetIds: !Split [',', !ImportValue { "Fn::Sub": "${FoundationStackName}-SubnetIds" }]
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_PREFIX: aurora-upgrade-planner-
+      Code:
+        ZipFile: |
+          import json, os, time, boto3
+          from datetime import datetime, timezone
+          TABLE = os.environ.get("DYNAMODB_TABLE_PREFIX","aurora-upgrade-planner-") + "connections"
+          ddb = boto3.resource("dynamodb")
+          tbl = ddb.Table(TABLE)
+          def handler(event, context):
+              rc = event.get("requestContext",{})
+              route = rc.get("routeKey","$default")
+              cid = rc.get("connectionId","")
+              if route == "$connect":
+                  now = datetime.now(timezone.utc).isoformat()
+                  ttl = int(time.time()) + 7200
+                  item = {"connectionId":cid,"connectedAt":now,"expiresAt":ttl}
+                  qp = event.get("queryStringParameters") or {}
+                  if qp.get("runId"): item["subscribedRunId"] = qp["runId"]
+                  tbl.put_item(Item=item)
+                  return {"statusCode":200,"body":"Connected"}
+              if route == "$disconnect":
+                  tbl.delete_item(Key={"connectionId":cid})
+                  return {"statusCode":200,"body":"Disconnected"}
+              body = {}
+              if event.get("body"):
+                  try: body = json.loads(event["body"])
+                  except: return {"statusCode":400,"body":json.dumps({"error":"Invalid JSON"})}
+              action = body.get("action", route)
+              if action == "subscribe":
+                  if not body.get("runId"):
+                      return {"statusCode":400,"body":json.dumps({"error":"Missing runId"})}
+                  ttl = int(time.time()) + 7200
+                  tbl.update_item(Key={"connectionId":cid},UpdateExpression="SET subscribedRunId=:r,expiresAt=:t",ExpressionAttributeValues={":r":body["runId"],":t":ttl})
+                  return {"statusCode":200,"body":json.dumps({"subscribed":body["runId"]})}
+              return {"statusCode":200,"body":json.dumps({"message":"Unknown action"})}
+
+  WsConnectLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref WsConnectLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*
+
+  # --------------------------------------------------------------------------
+  # Lambda — WebSocket Fan-out (DynamoDB Streams)
+  # --------------------------------------------------------------------------
+  WsFanoutLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: aurora-upgrade-planner-ws-fanout
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      Handler: index.handler
+      Timeout: 15
+      MemorySize: 128
+      Role: !GetAtt WsFanoutLambdaRole.Arn
+      ReservedConcurrentExecutions: 10
+      DeadLetterConfig:
+        TargetArn:
+          Fn::ImportValue: !Sub ${FoundationStackName}-LambdaDLQArn
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub ${FoundationStackName}-LambdaSecurityGroupId
+        SubnetIds: !Split [',', !ImportValue { "Fn::Sub": "${FoundationStackName}-SubnetIds" }]
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_PREFIX: aurora-upgrade-planner-
+          WEBSOCKET_ENDPOINT: !Sub https://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod
+      Code:
+        ZipFile: |
+          import json, os, boto3
+          from boto3.dynamodb.types import TypeDeserializer
+          TABLE = os.environ.get("DYNAMODB_TABLE_PREFIX","aurora-upgrade-planner-") + "connections"
+          WS_ENDPOINT = os.environ.get("WEBSOCKET_ENDPOINT","")
+          ddb = boto3.resource("dynamodb")
+          tbl = ddb.Table(TABLE)
+          deser = TypeDeserializer()
+          def deser_img(img):
+              return {k: deser.deserialize(v) for k,v in img.items()}
+          def handler(event, context):
+              if not WS_ENDPOINT:
+                  return {"statusCode":200,"body":"No endpoint"}
+              apigw = boto3.client("apigatewaymanagementapi",endpoint_url=WS_ENDPOINT)
+              for rec in event.get("Records",[]):
+                  if rec.get("eventName") != "INSERT": continue
+                  ni = rec.get("dynamodb",{}).get("NewImage")
+                  if not ni: continue
+                  pe = deser_img(ni)
+                  rid = pe.get("runId")
+                  if not rid: continue
+                  payload = {"type":"progress","runId":rid,"percentage":pe.get("percentage",0),"currentActivity":pe.get("currentActivity",""),"elapsedSeconds":pe.get("elapsedSeconds",0),"agentType":pe.get("agentType",""),"timestamp":pe.get("timestamp","")}
+                  resp = tbl.scan(FilterExpression="subscribedRunId=:r",ExpressionAttributeValues={":r":rid},ProjectionExpression="connectionId")
+                  for item in resp.get("Items",[]):
+                      cid = item["connectionId"]
+                      try:
+                          apigw.post_to_connection(ConnectionId=cid,Data=json.dumps(payload,default=str).encode("utf-8"))
+                      except apigw.exceptions.GoneException:
+                          try: tbl.delete_item(Key={"connectionId":cid})
+                          except: pass
+                      except: pass
+              return {"statusCode":200,"body":"OK"}
+
+  WsFanoutEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn:
+        Fn::ImportValue: !Sub ${FoundationStackName}-ProgressEventsStreamArn
+      FunctionName: !Ref WsFanoutLambda
+      StartingPosition: LATEST
+      BatchSize: 10
+      MaximumBatchingWindowInSeconds: 1
+
+# ============================================================================
+# Outputs
+# ============================================================================
+Outputs:
+  ApiGatewayURL:
+    Description: REST API Gateway URL
+    Value: !Sub https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/prod
+    Export:
+      Name: !Sub ${AWS::StackName}-ApiGatewayURL
+
+  ApiKeyId:
+    Description: API Key ID (use 'aws apigateway get-api-key --api-key <id> --include-value' to retrieve the value)
+    Value: !Ref RestApiKey
+    Export:
+      Name: !Sub ${AWS::StackName}-ApiKeyId
+
+  WebSocketURL:
+    Description: WebSocket API Gateway URL
+    Value: !Sub wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod
+    Export:
+      Name: !Sub ${AWS::StackName}-WebSocketURL
+
+  ApiLambdaArn:
+    Description: ARN of the API Lambda function
+    Value: !GetAtt ApiLambda.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-ApiLambdaArn
+
+  ApiLambdaFunctionName:
+    Description: Name of the API Lambda function
+    Value: !Ref ApiLambda
+    Export:
+      Name: !Sub ${AWS::StackName}-ApiLambdaFunctionName

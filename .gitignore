@@ -1,0 +1,33 @@
+node_modules/
+dist/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+/tmp/
+*.zip
+.vscode/
+
+# Saved installer config (contains account-specific values)
+conf/install.conf
+
+# AgentCore generated artifacts (contain account IDs and personal paths)
+**/cdk.out/
+**/.cache/
+**/.cli/
+**/.venv/
+**/aws-targets.json
+
+# Docs - only architecture-current.png is published
+docs/*.md
+docs/*.mmd
+docs/*.drawio
+docs/*.docx
+docs/*.txt
+docs/*.html
+
+# Deployment state
+.deploy-state
+
+# OS artifacts
+Thumbs.db
