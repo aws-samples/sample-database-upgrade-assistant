@@ -96,6 +96,27 @@ aws cloudformation deploy \
 
 The clone is created in the target account (same VPC as the source cluster). Write operations are scoped to `aurora-planner-test-*` — production clusters are never modified.
 
+### Permissions Required to Deploy
+
+The person running `./install.sh` needs admin or PowerUser access in the tool account, specifically:
+
+| Service | Why |
+|---------|-----|
+| CloudFormation | Deploy 2 stacks |
+| IAM | Create 3 roles (skip via split-team if restricted) |
+| Lambda | Create/update 9 functions |
+| DynamoDB | Create 5 tables |
+| S3 | Create 3 buckets |
+| CloudFront | Create 1 distribution |
+| API Gateway | Create REST + WebSocket APIs |
+| Step Functions | Create 1 state machine |
+| KMS | Create 1 encryption key |
+| EC2 | Create 1 security group, describe VPC/subnets |
+| Bedrock AgentCore | Deploy 3 agent runtimes |
+| SQS | Create 1 dead letter queue |
+
+**Common SCP blockers:** If your organization restricts `iam:CreateRole`, use the split-team deployment. If region-restricted, deploy in your allowed region. If Bedrock model access is controlled centrally, have the Bedrock admin enable Claude Haiku 4.5 and Sonnet 4.
+
 ## Project Structure
 
 ```
