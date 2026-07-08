@@ -14,7 +14,6 @@ import logging
 import os
 import sys
 
-import boto3
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -22,12 +21,14 @@ logger.setLevel(logging.INFO)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from shared.config import REGION
 from shared.state import get_run, update_phase, mark_failed
+from shared.rds_client import get_rds_client
 
-rds = boto3.client("rds", region_name=REGION)
+rds = None  # initialized per-invocation in handler
 
 
 def handler(event, context):
     """Lambda entry point."""
+    global rds
     run_id = event["runId"]
     clone_id = event["cloneId"]
 
@@ -38,9 +39,13 @@ def handler(event, context):
         run = get_run(run_id)
         target_version = run.get("targetVersion", "")
         engine = run.get("engine", "aurora-mysql")
+        cluster_arn = run.get("clusterArn", "")
         if not target_version:
             mark_failed(run_id, "No targetVersion in run state")
             return
+
+        # Initialize RDS client (cross-account if needed)
+        rds = get_rds_client(cluster_arn)
 
         # Determine the default parameter group for the target version
         target_pg = _get_default_pg_for_version(engine, target_version)

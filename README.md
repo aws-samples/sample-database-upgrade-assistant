@@ -80,6 +80,22 @@ If your security team manages IAM separately:
 2. Developer copies `conf/roles.conf.example` to `conf/roles.conf` and fills in the role ARNs
 3. Developer runs `./install.sh` — it detects `roles.conf` and skips IAM creation (no `CAPABILITY_NAMED_IAM` needed)
 
+### Cross-Account Access (Remote Clusters)
+
+To test clusters in a different AWS account:
+
+1. Deploy `infra/03-cross-account-role.yaml` in each target account:
+```bash
+aws cloudformation deploy \
+  --template-file infra/03-cross-account-role.yaml \
+  --stack-name aurora-upgrade-planner-cross-account \
+  --parameter-overrides ToolAccountId=YOUR_TOOL_ACCOUNT_ID ExternalId=YOUR_EXTERNAL_ID \
+  --capabilities CAPABILITY_NAMED_IAM
+```
+2. In the tool's Database List page, enter the target account ID — clusters will appear automatically
+
+The clone is created in the target account (same VPC as the source cluster). Write operations are scoped to `aurora-planner-test-*` — production clusters are never modified.
+
 ## Project Structure
 
 ```
@@ -94,8 +110,10 @@ frontend/
   src/components/        # Reusable components (GitHubIntegration, FindingsTable, etc.)
   src/services/api.ts    # API client with TypeScript interfaces
 infra/
+  00-iam-roles.yaml      # Standalone IAM roles (for split-team deployment)
   01-foundation.yaml     # DynamoDB, S3, CloudFront, Lambda, Step Functions, IAM
   02-frontend-api-stub.yaml  # API Gateway, WebSocket, API Lambda role
+  03-cross-account-role.yaml # Cross-account role (deploy in each target account)
   step-function.json     # Upgrade test pipeline state machine definition
 ```
 

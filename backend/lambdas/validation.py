@@ -35,14 +35,21 @@ from shared.config import (
 )
 from shared.state import get_run, update_phase, mark_complete, mark_failed
 from shared.s3_utils import put_json, put_html, get_json, generate_presigned_url
+from shared.rds_client import get_rds_client
 
-rds = boto3.client("rds", region_name=REGION)
+rds = None  # initialized per-invocation in handler
 
 
 def handler(event, context):
     """Lambda entry point."""
+    global rds
     run_id = event["runId"]
     clone_id = event["cloneId"]
+
+    # Initialize RDS client (cross-account if needed)
+    run = get_run(run_id)
+    cluster_arn = run.get("clusterArn", "") if run else ""
+    rds = get_rds_client(cluster_arn)
 
     try:
         update_phase(run_id, "validation", progress_pct=75)

@@ -1,0 +1,105 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  RDS Upgrade Assistant — Cross-Account Role.
+  Deploy this template in each TARGET account where Aurora clusters live.
+  The tool (installed in a separate account) assumes this role to list, clone,
+  upgrade, and validate clusters. Production clusters are never modified —
+  write operations are scoped to aurora-planner-test-* clone names only.
+
+# ============================================================================
+Parameters:
+  ToolAccountId:
+    Type: String
+    Description: AWS Account ID where the RDS Upgrade Assistant tool is installed
+    AllowedPattern: '^\d{12}$'
+    ConstraintDescription: Must be a 12-digit AWS account ID
+
+  ExternalId:
+    Type: String
+    NoEcho: true
+    Description: Shared secret (must match the ExternalId used during tool installation)
+
+# ============================================================================
+Resources:
+  CrossAccountRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aurora-upgrade-planner-cross-account-role
+      Description: Allows RDS Upgrade Assistant in the tool account to access Aurora clusters in this account
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS:
+                - !Sub arn:aws:iam::${ToolAccountId}:role/aurora-upgrade-planner-lambda-role
+                - !Sub arn:aws:iam::${ToolAccountId}:role/aurora-upgrade-planner-api-lambda-role
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId
+      ManagedPolicyArns:
+        - !Ref CrossAccountPolicy
+
+  CrossAccountPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: aurora-upgrade-planner-cross-account-policy
+      Description: Permissions for RDS Upgrade Assistant to list, clone, upgrade, and clean up Aurora clusters
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: RDSReadOnly
+            Effect: Allow
+            Action:
+              - rds:DescribeDBClusters
+              - rds:DescribeDBInstances
+              - rds:DescribeDBEngineVersions
+              - rds:DescribeDBClusterParameters
+              - rds:DescribeDBClusterSnapshots
+              - rds:ListTagsForResource
+            Resource: '*'
+          - Sid: RDSClone
+            Effect: Allow
+            Action:
+              - rds:RestoreDBClusterToPointInTime
+              - rds:RestoreDBClusterFromSnapshot
+              - rds:CopyDBClusterSnapshot
+            Resource:
+              - !Sub arn:aws:rds:*:${AWS::AccountId}:cluster:*
+              - !Sub arn:aws:rds:*:${AWS::AccountId}:subgrp:*
+              - !Sub arn:aws:rds:*:${AWS::AccountId}:cluster-snapshot:*
+          - Sid: RDSWriteOnClonesOnly
+            # Write operations scoped to test clone names — cannot modify production clusters
+            Effect: Allow
+            Action:
+              - rds:CreateDBInstance
+              - rds:ModifyDBCluster
+              - rds:DeleteDBCluster
+              - rds:DeleteDBInstance
+              - rds:DeleteDBClusterSnapshot
+              - rds:AddTagsToResource
+            Resource:
+              - !Sub arn:aws:rds:*:${AWS::AccountId}:cluster:aurora-planner-test-*
+              - !Sub arn:aws:rds:*:${AWS::AccountId}:db:aurora-planner-test-*
+              - !Sub arn:aws:rds:*:${AWS::AccountId}:cluster-snapshot:aurora-planner-*
+              - !Sub arn:aws:rds:*:${AWS::AccountId}:cluster-pg:aurora-planner-*
+              - !Sub arn:aws:rds:*:${AWS::AccountId}:cluster-pg:default.*
+              - !Sub arn:aws:rds:*:${AWS::AccountId}:pg:aurora-planner-*
+              - !Sub arn:aws:rds:*:${AWS::AccountId}:pg:default.*
+          - Sid: PerformanceInsights
+            Effect: Allow
+            Action:
+              - pi:GetResourceMetrics
+              - pi:DescribeDimensionKeys
+            Resource: '*'
+
+# ============================================================================
+Outputs:
+  CrossAccountRoleArn:
+    Description: ARN of the cross-account role — no action needed, the tool discovers it by convention
+    Value: !GetAtt CrossAccountRole.Arn
+
+  DeploymentInstructions:
+    Description: This role is ready. Enter this account ID in the tool's Database List page to access clusters.
+    Value: !Sub "Cross-account role created. Tool account ${ToolAccountId} can now access Aurora clusters in account ${AWS::AccountId}."

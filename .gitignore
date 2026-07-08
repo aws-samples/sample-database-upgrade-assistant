@@ -25,6 +25,7 @@ docs/*.drawio
 docs/*.docx
 docs/*.txt
 docs/*.html
+docs/*.pptx
 
 # Deployment state
 .deploy-state

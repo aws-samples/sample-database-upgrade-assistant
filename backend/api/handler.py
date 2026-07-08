@@ -1063,8 +1063,22 @@ def handle_cluster_analysis(event):
         return _response(400, {"error": "clusterArn is required"})
 
     try:
-        rds = boto3.client("rds", region_name=region)
         cluster_id = cluster_arn.split(":")[-1]
+        cluster_account = cluster_arn.split(":")[4] if cluster_arn.count(":") >= 5 else ""
+
+        if cluster_account and cluster_account != _get_current_account_id():
+            sts = boto3.client("sts")
+            role_arn = f"arn:aws:iam::{cluster_account}:role/aurora-upgrade-planner-cross-account-role"
+            assume_kwargs = {"RoleArn": role_arn, "RoleSessionName": "cluster-analysis", "DurationSeconds": 900}
+            if EXTERNAL_ID:
+                assume_kwargs["ExternalId"] = EXTERNAL_ID
+            creds = sts.assume_role(**assume_kwargs)["Credentials"]
+            rds = boto3.client("rds", region_name=region,
+                aws_access_key_id=creds["AccessKeyId"],
+                aws_secret_access_key=creds["SecretAccessKey"],
+                aws_session_token=creds["SessionToken"])
+        else:
+            rds = boto3.client("rds", region_name=region)
 
         # Describe cluster
         resp = rds.describe_db_clusters(DBClusterIdentifier=cluster_id)
@@ -1373,8 +1387,23 @@ def handle_upgrade_test_preflight(event):
 
     try:
         # Describe the cluster to get current version/engine
-        rds = boto3.client("rds", region_name=region)
         cluster_id = cluster_arn.split(":")[-1]
+        cluster_account = cluster_arn.split(":")[4] if cluster_arn.count(":") >= 5 else ""
+
+        if cluster_account and cluster_account != _get_current_account_id():
+            sts = boto3.client("sts")
+            role_arn = f"arn:aws:iam::{cluster_account}:role/aurora-upgrade-planner-cross-account-role"
+            assume_kwargs = {"RoleArn": role_arn, "RoleSessionName": "preflight", "DurationSeconds": 900}
+            if EXTERNAL_ID:
+                assume_kwargs["ExternalId"] = EXTERNAL_ID
+            creds = sts.assume_role(**assume_kwargs)["Credentials"]
+            rds = boto3.client("rds", region_name=region,
+                aws_access_key_id=creds["AccessKeyId"],
+                aws_secret_access_key=creds["SecretAccessKey"],
+                aws_session_token=creds["SessionToken"])
+        else:
+            rds = boto3.client("rds", region_name=region)
+
         resp = rds.describe_db_clusters(DBClusterIdentifier=cluster_id)
         cluster = resp["DBClusters"][0]
         current_version = cluster.get("EngineVersion", "")
@@ -1533,8 +1562,25 @@ def handle_upgrade_test_run(event):
     source_engine = ""
     source_version = ""
     try:
-        rds_client = boto3.client("rds", region_name=os.environ.get("AWS_REGION", "us-east-1"))
+        region = os.environ.get("AWS_REGION", "us-east-1")
         cluster_id = cluster_arn.split(":")[-1]
+        cluster_account = cluster_arn.split(":")[4] if cluster_arn.count(":") >= 5 else ""
+
+        # Cross-account: assume role if cluster is in a different account
+        if cluster_account and cluster_account != _get_current_account_id():
+            sts = boto3.client("sts")
+            role_arn = f"arn:aws:iam::{cluster_account}:role/aurora-upgrade-planner-cross-account-role"
+            assume_kwargs = {"RoleArn": role_arn, "RoleSessionName": "upgrade-test-start", "DurationSeconds": 900}
+            if EXTERNAL_ID:
+                assume_kwargs["ExternalId"] = EXTERNAL_ID
+            creds = sts.assume_role(**assume_kwargs)["Credentials"]
+            rds_client = boto3.client("rds", region_name=region,
+                aws_access_key_id=creds["AccessKeyId"],
+                aws_secret_access_key=creds["SecretAccessKey"],
+                aws_session_token=creds["SessionToken"])
+        else:
+            rds_client = boto3.client("rds", region_name=region)
+
         desc = rds_client.describe_db_clusters(DBClusterIdentifier=cluster_id)
         source_engine = desc["DBClusters"][0].get("Engine", "")
         source_version = desc["DBClusters"][0].get("EngineVersion", "")

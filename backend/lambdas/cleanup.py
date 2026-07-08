@@ -26,15 +26,22 @@ logger.setLevel(logging.INFO)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from shared.config import REGION
 from shared.state import get_run
+from shared.rds_client import get_rds_client
 
-rds = boto3.client("rds", region_name=REGION)
+rds = None  # initialized per-invocation in handler
 
 
 def handler(event, context):
     """Lambda entry point."""
+    global rds
     run_id = event.get("runId", "")
     clone_id = event.get("cloneId", "")
     snapshot_id = event.get("snapshotId", "")
+
+    # Initialize RDS client (cross-account if needed)
+    run = get_run(run_id) if run_id else None
+    cluster_arn = run.get("clusterArn", "") if run else ""
+    rds = get_rds_client(cluster_arn)
 
     # If either ID is missing, look them up from DynamoDB run state in one read
     if run_id and (not clone_id or not snapshot_id):

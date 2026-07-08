@@ -13,6 +13,12 @@ Parameters:
     Default: aurora-upgrade-planner-foundation
     Description: Name of the foundation stack to import outputs from
 
+  ExternalId:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: ExternalId for cross-account role assumption (same value used in foundation stack)
+
 # ============================================================================
 # Resources
 # ============================================================================
@@ -532,6 +538,7 @@ Resources:
           CODE_ANALYSIS_LAMBDA_NAME: aurora-upgrade-planner-code-analysis
           WEBSOCKET_URL: !Sub wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod
           BEDROCK_MODEL_ID: us.anthropic.claude-haiku-4-5-20251001-v1:0
+          EXTERNAL_ID: !Ref ExternalId
           ALLOWED_ORIGINS:
             Fn::ImportValue: !Sub ${FoundationStackName}-CloudFrontURL
       Code:

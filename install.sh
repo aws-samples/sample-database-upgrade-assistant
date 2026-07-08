@@ -184,13 +184,14 @@ if [ "$USE_PRECREATED_ROLES" = true ]; then
     --template-file infra/02-frontend-api-stub.yaml \
     --stack-name aurora-upgrade-planner-frontend-api \
     --parameter-overrides FoundationStackName=aurora-upgrade-planner-foundation \
-      ApiLambdaRoleArn="$API_ROLE_ARN" \
+      ApiLambdaRoleArn="$API_ROLE_ARN" ExternalId="$EXTERNAL_ID" \
     --capabilities $CFN_CAPABILITIES
 else
   deploy_stack aurora-upgrade-planner-frontend-api \
     --template-file infra/02-frontend-api-stub.yaml \
     --stack-name aurora-upgrade-planner-frontend-api \
     --parameter-overrides FoundationStackName=aurora-upgrade-planner-foundation \
+      ExternalId="$EXTERNAL_ID" \
     --capabilities $CFN_CAPABILITIES
 fi
 

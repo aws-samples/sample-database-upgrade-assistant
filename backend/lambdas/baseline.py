@@ -28,16 +28,21 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from shared.config import REGION, DB_SECRET_ARN, QUERY_REPLAY_LIMIT
 from shared.state import update_phase, mark_failed
 from shared.s3_utils import put_json
+from shared.rds_client import get_rds_client
 
-rds = boto3.client("rds", region_name=REGION)
+rds = None  # initialized per-invocation in handler
 
 
 def handler(event, context):
     """Lambda entry point."""
+    global rds
     run_id = event["runId"]
     cluster_arn = event["clusterArn"]
     engine = event.get("engine", "aurora-mysql")
     target_version = event.get("targetVersion", "")
+
+    # Initialize RDS client (cross-account if needed)
+    rds = get_rds_client(cluster_arn)
 
     try:
         update_phase(run_id, "baseline", progress_pct=5)
