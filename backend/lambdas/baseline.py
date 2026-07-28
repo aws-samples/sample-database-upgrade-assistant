@@ -460,7 +460,9 @@ def _collect_from_performance_insights(cluster, engine):
     """
     queries = []
     try:
-        pi = boto3.client("pi", region_name=REGION)
+        cluster_arn = cluster.get("DBClusterArn", "")
+        pi_region = cluster_arn.split(":")[3] if cluster_arn and cluster_arn.count(":") >= 4 else REGION
+        pi = boto3.client("pi", region_name=pi_region)
         members = cluster.get("DBClusterMembers", [])
         writer_id = next(
             (m["DBInstanceIdentifier"] for m in members if m.get("IsClusterWriter")), None

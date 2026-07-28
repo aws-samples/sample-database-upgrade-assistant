@@ -70,6 +70,8 @@ Resources:
               - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/aurora-upgrade-planner-*
               - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/aurora-upgrade-planner-*/index/*
           - Sid: RDSReadOnly
+            # Resource: '*' required — AWS does not support resource-level restrictions
+            # for rds:Describe* APIs. These are read-only enumeration actions.
             Effect: Allow
             Action:
               - rds:DescribeDBEngineVersions
@@ -106,6 +108,7 @@ Resources:
               - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:pg:aurora-planner-*
               - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:pg:default.*
           - Sid: PerformanceInsights
+            # Resource: '*' required — PI does not support resource-level restrictions
             Effect: Allow
             Action:
               - pi:GetResourceMetrics

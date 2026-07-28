@@ -39,6 +39,15 @@ def _validate_arn(arn, label="ARN"):
         raise ValueError(f"Invalid {label}: must be a valid RDS cluster ARN (arn:aws:rds:region:account:cluster:name)")
 
 
+def _region_from_arn(arn):
+    """Extract the region from an RDS ARN. Falls back to AWS_REGION env var."""
+    if arn and arn.count(":") >= 4:
+        region = arn.split(":")[3]
+        if region:
+            return region
+    return os.environ.get("AWS_REGION", "us-east-1")
+
+
 def _validate_account_id(account_id):
     """Validate AWS account ID format."""
     if account_id and not _ACCOUNT_PATTERN.match(account_id):
@@ -59,18 +68,14 @@ _ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "").split(",")
 _current_event = None  # Set by handler() for CORS origin resolution
 
 def _cors_origin(event=None):
-    """Return the CORS origin header — reflect the request origin if it's in the allowed list."""
+    """Return the CORS origin header only if it matches an allowed origin exactly."""
     evt = event or _current_event
     origin = ""
     if evt:
         origin = (evt.get("headers") or {}).get("origin", "") or (evt.get("headers") or {}).get("Origin", "")
-    if origin and (
-        origin.endswith(".cloudfront.net")
-        or origin.startswith("http://localhost")
-        or origin in _ALLOWED_ORIGINS
-    ):
+    if origin and origin in _ALLOWED_ORIGINS:
         return origin
-    return _ALLOWED_ORIGINS[0] if _ALLOWED_ORIGINS and _ALLOWED_ORIGINS[0] else "*"
+    return _ALLOWED_ORIGINS[0] if _ALLOWED_ORIGINS and _ALLOWED_ORIGINS[0] else ""
 
 CORS_HEADERS = {
     "Content-Type": "application/json",
@@ -80,16 +85,13 @@ CORS_HEADERS = {
 
 TABLE_PREFIX = os.environ.get("DYNAMODB_TABLE_PREFIX", "aurora-upgrade-planner-")
 S3_BUCKET = os.environ.get("S3_REPORT_BUCKET", "")
-WEBSOCKET_URL = os.environ.get("WEBSOCKET_URL", "")
 UPGRADE_TEST_STATE_MACHINE_ARN = os.environ.get("UPGRADE_TEST_STATE_MACHINE_ARN", "")
 DEPRECATION_LAMBDA = os.environ.get("DEPRECATION_LAMBDA_NAME", "aurora-upgrade-planner-deprecation")
 CODE_ANALYSIS_LAMBDA = os.environ.get("CODE_ANALYSIS_LAMBDA_NAME", "aurora-upgrade-planner-code-analysis")
 EXTERNAL_ID = os.environ.get("EXTERNAL_ID", "")
+SCAN_REGIONS = [r.strip() for r in os.environ.get("SCAN_REGIONS", "us-east-1,us-east-2,us-west-2,us-west-1").split(",") if r.strip()]
 BEDROCK_MODEL_ID = os.environ.get(
     "BEDROCK_MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-)
-CODE_ANALYSIS_MODEL_ID = os.environ.get(
-    "CODE_ANALYSIS_MODEL_ID", "us.anthropic.claude-sonnet-4-20250514-v1:0"
 )
 
 # Lazy-init AWS clients (created on first use inside Lambda)
@@ -185,6 +187,8 @@ def _parse_body(event):
 def handle_databases(event):
     """GET /databases — list Aurora clusters in the current or a cross-account.
 
+    Scans all regions defined in SCAN_REGIONS env var (comma-separated).
+
     Query params:
       accountId  — optional; if omitted uses the Lambda's own account
       externalId — optional override for cross-account ExternalId
@@ -192,7 +196,6 @@ def handle_databases(event):
     query_params = event.get("queryStringParameters") or {}
     target_account = query_params.get("accountId", "").strip()
     ext_id = query_params.get("externalId", EXTERNAL_ID).strip()
-    region = os.environ.get("AWS_REGION", "us-east-1")
 
     try:
         _validate_account_id(target_account)
@@ -200,48 +203,51 @@ def handle_databases(event):
         return _response(400, {"error": str(e)})
 
     try:
-        if target_account and target_account != _get_current_account_id():
-            # Cross-account: assume role
-            sts = boto3.client("sts")
-            role_arn = f"arn:aws:iam::{target_account}:role/aurora-upgrade-planner-cross-account-role"
-            assume_kwargs = {
-                "RoleArn": role_arn,
-                "RoleSessionName": "database-list",
-                "DurationSeconds": 900,
-            }
-            if ext_id:
-                assume_kwargs["ExternalId"] = ext_id
-            creds = sts.assume_role(**assume_kwargs)["Credentials"]
-            rds = boto3.client(
-                "rds",
-                region_name=region,
-                aws_access_key_id=creds["AccessKeyId"],
-                aws_secret_access_key=creds["SecretAccessKey"],
-                aws_session_token=creds["SessionToken"],
-            )
-            account_id = target_account
-        else:
-            rds = boto3.client("rds", region_name=region)
-            account_id = _get_current_account_id()
-
-        paginator = rds.get_paginator("describe_db_clusters")
         clusters = []
-        for page in paginator.paginate():
-            for c in page.get("DBClusters", []):
-                engine = c.get("Engine", "")
-                if engine not in ("aurora-mysql", "aurora-postgresql"):
-                    continue
-                clusters.append({
-                    "clusterId": c.get("DBClusterIdentifier", ""),
-                    "clusterArn": c.get("DBClusterArn", ""),
-                    "engine": engine,
-                    "engineVersion": c.get("EngineVersion", ""),
-                    "status": c.get("Status", ""),
-                    "endpoint": c.get("Endpoint", ""),
-                    "multiAz": c.get("MultiAZ", False),
-                    "accountId": account_id,
-                    "region": region,
-                })
+        account_id = ""
+
+        for region in SCAN_REGIONS:
+            if target_account and target_account != _get_current_account_id():
+                # Cross-account: assume role
+                sts = boto3.client("sts")
+                role_arn = f"arn:aws:iam::{target_account}:role/aurora-upgrade-planner-cross-account-role"
+                assume_kwargs = {
+                    "RoleArn": role_arn,
+                    "RoleSessionName": "database-list",
+                    "DurationSeconds": 900,
+                }
+                if ext_id:
+                    assume_kwargs["ExternalId"] = ext_id
+                creds = sts.assume_role(**assume_kwargs)["Credentials"]
+                rds = boto3.client(
+                    "rds",
+                    region_name=region,
+                    aws_access_key_id=creds["AccessKeyId"],
+                    aws_secret_access_key=creds["SecretAccessKey"],
+                    aws_session_token=creds["SessionToken"],
+                )
+                account_id = target_account
+            else:
+                rds = boto3.client("rds", region_name=region)
+                account_id = _get_current_account_id()
+
+            paginator = rds.get_paginator("describe_db_clusters")
+            for page in paginator.paginate():
+                for c in page.get("DBClusters", []):
+                    engine = c.get("Engine", "")
+                    if engine not in ("aurora-mysql", "aurora-postgresql"):
+                        continue
+                    clusters.append({
+                        "clusterId": c.get("DBClusterIdentifier", ""),
+                        "clusterArn": c.get("DBClusterArn", ""),
+                        "engine": engine,
+                        "engineVersion": c.get("EngineVersion", ""),
+                        "status": c.get("Status", ""),
+                        "endpoint": c.get("Endpoint", ""),
+                        "multiAz": c.get("MultiAZ", False),
+                        "accountId": account_id,
+                        "region": region,
+                    })
 
         # Enrich with upgrade readiness from deprecation catalog + code analysis runs
         clusters = _enrich_upgrade_readiness(clusters)
@@ -400,7 +406,7 @@ def handle_deprecation_run(event):
         )
     except Exception as e:
         logger.error("Failed to create run record: %s", e)
-        return _response(500, {"error": "Failed to create run record", "message": str(e)})
+        return _response(500, {"error": "Failed to create run record", "message": "Internal error. Check CloudWatch logs for details."})
 
     # Invoke Lambda asynchronously
     try:
@@ -422,7 +428,7 @@ def handle_deprecation_run(event):
             )
         except Exception:
             pass
-        return _response(500, {"error": "Failed to invoke Lambda", "message": str(e)})
+        return _response(500, {"error": "Failed to invoke Lambda", "message": "Internal error. Check CloudWatch logs for details."})
 
     return _response(202, {
         "runId": run_id,
@@ -508,10 +514,10 @@ def handle_deprecation_catalog(event):
                 "message": "Deprecation catalog not found. Run Deprecation Analysis first.",
             })
         logger.error("S3 error reading catalog: %s", e)
-        return _response(500, {"error": "Failed to read catalog", "message": str(e)})
+        return _response(500, {"error": "Failed to read catalog", "message": "Internal error. Check CloudWatch logs for details."})
     except Exception as e:
         logger.error("Error reading catalog: %s", e)
-        return _response(500, {"error": "Failed to read catalog", "message": str(e)})
+        return _response(500, {"error": "Failed to read catalog", "message": "Internal error. Check CloudWatch logs for details."})
 
 
 def handle_deprecation_runs(event):
@@ -529,7 +535,7 @@ def handle_deprecation_runs(event):
         return _response(200, runs)
     except Exception as e:
         logger.error("Error querying deprecation runs: %s", e)
-        return _response(500, {"error": "Failed to query runs", "message": str(e)})
+        return _response(500, {"error": "Failed to query runs", "message": "Internal error. Check CloudWatch logs for details."})
 
 
 def handle_code_analysis_run(event):
@@ -586,7 +592,7 @@ def handle_code_analysis_run(event):
         )
     except Exception as e:
         logger.error("Failed to create run record: %s", e)
-        return _response(500, {"error": "Failed to create run record", "message": str(e)})
+        return _response(500, {"error": "Failed to create run record", "message": "Internal error. Check CloudWatch logs for details."})
 
     # Invoke Lambda asynchronously
     try:
@@ -618,7 +624,7 @@ def handle_code_analysis_run(event):
             )
         except Exception:
             pass
-        return _response(500, {"error": "Failed to invoke Lambda", "message": str(e)})
+        return _response(500, {"error": "Failed to invoke Lambda", "message": "Internal error. Check CloudWatch logs for details."})
 
     return _response(202, {
         "runId": run_id,
@@ -650,7 +656,7 @@ def handle_run_status(event, run_id):
 
     except Exception as e:
         logger.error("Error checking run status for %s: %s", run_id, e)
-        return _response(500, {"error": "Failed to check run status", "message": str(e)})
+        return _response(500, {"error": "Failed to check run status", "message": "Internal error. Check CloudWatch logs for details."})
 
 
 def handle_code_analysis_findings(event, run_id):
@@ -702,7 +708,7 @@ def handle_code_analysis_findings(event, run_id):
         })
     except Exception as e:
         logger.error("Error querying findings for run %s: %s", run_id, e)
-        return _response(500, {"error": "Failed to query findings", "message": str(e)})
+        return _response(500, {"error": "Failed to query findings", "message": "Internal error. Check CloudWatch logs for details."})
 
 
 def handle_code_analysis_runs(event):
@@ -720,7 +726,7 @@ def handle_code_analysis_runs(event):
         return _response(200, runs)
     except Exception as e:
         logger.error("Error querying code analysis runs: %s", e)
-        return _response(500, {"error": "Failed to query runs", "message": str(e)})
+        return _response(500, {"error": "Failed to query runs", "message": "Internal error. Check CloudWatch logs for details."})
 
 
 def handle_code_analysis_history(event):
@@ -752,7 +758,7 @@ def handle_code_analysis_history(event):
         return _response(200, runs)
     except Exception as e:
         logger.error("Error querying run history: %s", e)
-        return _response(500, {"error": "Failed to query history", "message": str(e)})
+        return _response(500, {"error": "Failed to query history", "message": "Internal error. Check CloudWatch logs for details."})
 
 
 def handle_dashboard_summary(event):
@@ -876,7 +882,7 @@ def handle_dashboard_summary(event):
         })
     except Exception as e:
         logger.error("Error building dashboard summary: %s", e)
-        return _response(500, {"error": "Failed to build summary", "message": str(e)})
+        return _response(500, {"error": "Failed to build summary", "message": "Internal error. Check CloudWatch logs for details."})
 
 
 def handle_settings_get(event):
@@ -914,7 +920,7 @@ def handle_settings_get(event):
         })
     except Exception as e:
         logger.error("Error reading settings: %s", e)
-        return _response(500, {"error": "Failed to read settings", "message": str(e)})
+        return _response(500, {"error": "Failed to read settings", "message": "Internal error. Check CloudWatch logs for details."})
 
 
 def handle_settings_put(event):
@@ -958,7 +964,7 @@ def handle_settings_put(event):
         })
     except Exception as e:
         logger.error("Error saving settings: %s", e)
-        return _response(500, {"error": "Failed to save settings", "message": str(e)})
+        return _response(500, {"error": "Failed to save settings", "message": "Internal error. Check CloudWatch logs for details."})
 
 
 def handle_settings_validate_credentials(event):
@@ -1057,7 +1063,7 @@ def handle_cluster_analysis(event):
     query_params = event.get("queryStringParameters") or {}
     cluster_arn = query_params.get("clusterArn", "").strip()
     target_version = query_params.get("targetVersion", "").strip()
-    region = os.environ.get("AWS_REGION", "us-east-1")
+    region = _region_from_arn(cluster_arn)
 
     if not cluster_arn:
         return _response(400, {"error": "clusterArn is required"})
@@ -1293,7 +1299,7 @@ def handle_cluster_analysis(event):
         return _response(500, {"error": e.response["Error"]["Code"], "message": e.response["Error"]["Message"]})
     except Exception as e:
         logger.error("Cluster analysis error: %s", e)
-        return _response(500, {"error": "Cluster analysis failed", "message": str(e)})
+        return _response(500, {"error": "Cluster analysis failed", "message": "Internal error. Check CloudWatch logs for details."})
 
 
 def handle_cluster_analysis_runs(event):
@@ -1324,7 +1330,7 @@ def handle_cluster_analysis_runs(event):
         return _response(200, {"runs": runs})
     except Exception as e:
         logger.error("Error listing cluster analysis runs: %s", e)
-        return _response(500, {"error": "Failed to list runs", "message": str(e)})
+        return _response(500, {"error": "Failed to list runs", "message": "Internal error. Check CloudWatch logs for details."})
 
 
 def handle_cluster_analysis_get(event, run_id):
@@ -1337,10 +1343,10 @@ def handle_cluster_analysis_get(event, run_id):
         if e.response["Error"]["Code"] == "NoSuchKey":
             return _response(404, {"error": "Run not found"})
         logger.error("Error fetching cluster analysis run %s: %s", run_id, e)
-        return _response(500, {"error": "Failed to fetch run", "message": str(e)})
+        return _response(500, {"error": "Failed to fetch run", "message": "Internal error. Check CloudWatch logs for details."})
     except Exception as e:
         logger.error("Error fetching cluster analysis run %s: %s", run_id, e)
-        return _response(500, {"error": "Failed to fetch run", "message": str(e)})
+        return _response(500, {"error": "Failed to fetch run", "message": "Internal error. Check CloudWatch logs for details."})
 
 
 def handle_upgrade_test_result(event, run_id):
@@ -1370,7 +1376,7 @@ def handle_upgrade_test_result(event, run_id):
         }
         return _response(200, result)
     except Exception as e:
-        return _response(500, {"error": "Failed to get result", "message": str(e)})
+        return _response(500, {"error": "Failed to get result", "message": "Internal error. Check CloudWatch logs for details."})
 
 
 def handle_upgrade_test_preflight(event):
@@ -1380,7 +1386,7 @@ def handle_upgrade_test_preflight(event):
     query_params = event.get("queryStringParameters") or {}
     cluster_arn = query_params.get("clusterArn", "").strip()
     target_version = query_params.get("targetVersion", "").strip()
-    region = os.environ.get("AWS_REGION", "us-east-1")
+    region = _region_from_arn(cluster_arn)
 
     if not cluster_arn:
         return _response(400, {"error": "clusterArn is required"})
@@ -1530,7 +1536,7 @@ def handle_upgrade_test_preflight(event):
         return _response(500, {"error": e.response["Error"]["Code"], "message": e.response["Error"]["Message"]})
     except Exception as e:
         logger.error("Preflight error: %s", e)
-        return _response(500, {"error": "Preflight failed", "message": str(e)})
+        return _response(500, {"error": "Preflight failed", "message": "Internal error. Check CloudWatch logs for details."})
 
 
 def handle_upgrade_test_run(event):
@@ -1562,7 +1568,7 @@ def handle_upgrade_test_run(event):
     source_engine = ""
     source_version = ""
     try:
-        region = os.environ.get("AWS_REGION", "us-east-1")
+        region = _region_from_arn(cluster_arn)
         cluster_id = cluster_arn.split(":")[-1]
         cluster_account = cluster_arn.split(":")[4] if cluster_arn.count(":") >= 5 else ""
 
@@ -1605,7 +1611,7 @@ def handle_upgrade_test_run(event):
         })
     except Exception as e:
         logger.error("Failed to create upgrade-test run record: %s", e)
-        return _response(500, {"error": "Failed to create run record", "message": str(e)})
+        return _response(500, {"error": "Failed to create run record", "message": "Internal error. Check CloudWatch logs for details."})
 
     try:
         payload = {
@@ -1644,7 +1650,7 @@ def handle_upgrade_test_run(event):
             )
         except Exception:
             pass
-        return _response(500, {"error": "Failed to start execution", "message": str(e)})
+        return _response(500, {"error": "Failed to start execution", "message": "Internal error. Check CloudWatch logs for details."})
 
     return _response(202, {
         "runId": run_id,
@@ -1724,7 +1730,7 @@ def handle_upgrade_test_delete(event, run_id):
 
     except Exception as e:
         logger.error("Error deleting run %s: %s", run_id, e)
-        return _response(500, {"error": "Failed to delete run", "message": str(e)})
+        return _response(500, {"error": "Failed to delete run", "message": "Internal error. Check CloudWatch logs for details."})
 
 
 def handle_upgrade_test_runs(event):
@@ -1762,7 +1768,7 @@ def handle_upgrade_test_runs(event):
                         pass
         return _response(200, runs)
     except Exception as e:
-        return _response(500, {"error": "Failed to query runs", "message": str(e)})
+        return _response(500, {"error": "Failed to query runs", "message": "Internal error. Check CloudWatch logs for details."})
 
 
 def handle_upgrade_test_get(event, run_id):
@@ -1801,7 +1807,7 @@ def handle_upgrade_test_get(event, run_id):
 
         return _response(200, run)
     except Exception as e:
-        return _response(500, {"error": "Failed to get run", "message": str(e)})
+        return _response(500, {"error": "Failed to get run", "message": "Internal error. Check CloudWatch logs for details."})
 
 
 def handle_upgrade_test_replay(event, run_id):
@@ -1826,7 +1832,7 @@ def handle_upgrade_test_replay(event, run_id):
             raise
     except Exception as e:
         logger.error("Error fetching replay data for run %s: %s", run_id, e)
-        return _response(500, {"error": "Failed to fetch replay data", "message": str(e)})
+        return _response(500, {"error": "Failed to fetch replay data", "message": "Internal error. Check CloudWatch logs for details."})
 
 
 def _match_route(method, path):
@@ -1936,5 +1942,5 @@ def handler(event, context):
     except Exception as e:
         return _response(500, {
             "error": "Internal Server Error",
-            "message": str(e),
+            "message": "Internal error. Check CloudWatch logs for details.",
         })

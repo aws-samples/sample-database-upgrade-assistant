@@ -364,7 +364,8 @@ def _determine_engine(cluster_arn):
     engine = "aurora-mysql"  # default
     if cluster_arn:
         try:
-            rds = boto3.client("rds", region_name=REGION)
+            cluster_region = cluster_arn.split(":")[3] if cluster_arn.count(":") >= 4 else REGION
+            rds = boto3.client("rds", region_name=cluster_region)
             cluster_id = cluster_arn.split(":")[-1]
             resp = rds.describe_db_clusters(DBClusterIdentifier=cluster_id)
             engine = resp["DBClusters"][0].get("Engine", "aurora-mysql")
@@ -393,7 +394,8 @@ def _resolve_target_version(user_target, engine, cluster_arn, catalog):
     current_version = ""
     if cluster_arn:
         try:
-            rds = boto3.client("rds", region_name=REGION)
+            cluster_region = cluster_arn.split(":")[3] if cluster_arn.count(":") >= 4 else REGION
+            rds = boto3.client("rds", region_name=cluster_region)
             cluster_id = cluster_arn.split(":")[-1]
             resp = rds.describe_db_clusters(DBClusterIdentifier=cluster_id)
             current_version = resp["DBClusters"][0].get("EngineVersion", "")
