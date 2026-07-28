@@ -58,8 +58,8 @@ No direct Bedrock API calls — all AI inference goes through AgentCore.
 ## Installation
 
 ```bash
-git clone https://github.com/aws-samples/rds-upgrade-assistant.git
-cd rds-upgrade-assistant
+git clone https://github.com/aws-samples/sample-database-upgrade-assistant.git
+cd sample-database-upgrade-assistant
 ./install.sh
 ```
 
@@ -96,6 +96,17 @@ aws cloudformation deploy \
 
 The clone is created in the target account (same VPC as the source cluster). Write operations are scoped to `aurora-planner-test-*` — production clusters are never modified.
 
+### Multi-Region Support
+
+By default, the tool scans 4 US regions for Aurora clusters: `us-east-1`, `us-east-2`, `us-west-2`, `us-west-1`.
+
+To customize, set the `SCAN_REGIONS` environment variable on the API Lambda:
+```
+SCAN_REGIONS=us-east-1,eu-west-1,ap-southeast-1
+```
+
+All cluster operations (clone, upgrade, validate) automatically use the correct region extracted from the cluster ARN — no additional configuration needed.
+
 ### Permissions Required to Deploy
 
 The person running `./install.sh` needs admin or PowerUser access in the tool account, specifically:
@@ -115,7 +126,7 @@ The person running `./install.sh` needs admin or PowerUser access in the tool ac
 | Bedrock AgentCore | Deploy 3 agent runtimes |
 | SQS | Create 1 dead letter queue |
 
-**Common SCP blockers:** If your organization restricts `iam:CreateRole`, use the split-team deployment. If region-restricted, deploy in your allowed region. If Bedrock model access is controlled centrally, have the Bedrock admin enable Claude Haiku 4.5 and Sonnet 4.
+**Common SCP blockers:** If your organization restricts `iam:CreateRole`, use the split-team deployment. If region-restricted, deploy in your allowed region. If Bedrock model access is controlled centrally, have the Bedrock admin enable Claude Haiku 4.5 and Sonnet 4.5.
 
 ## Project Structure
 
@@ -135,7 +146,6 @@ infra/
   01-foundation.yaml     # DynamoDB, S3, CloudFront, Lambda, Step Functions, IAM
   02-frontend-api-stub.yaml  # API Gateway, WebSocket, API Lambda role
   03-cross-account-role.yaml # Cross-account role (deploy in each target account)
-  step-function.json     # Upgrade test pipeline state machine definition
 ```
 
 ## Usage
